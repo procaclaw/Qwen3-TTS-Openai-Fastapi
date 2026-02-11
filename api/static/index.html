@@ -452,6 +452,34 @@
                         </div>
 
                         <div class="form-group">
+                            <label for="model">Model</label>
+                            <select id="model">
+                                <option value="qwen3-tts">qwen3-tts</option>
+                                <option value="tts-1">tts-1</option>
+                                <option value="tts-1-hd">tts-1-hd</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="language">Language</label>
+                            <select id="language">
+                                <option value="Auto">Auto-detect</option>
+                                <option value="English">English</option>
+                                <option value="Chinese">Chinese</option>
+                                <option value="Japanese">Japanese</option>
+                                <option value="Korean">Korean</option>
+                                <option value="German">German</option>
+                                <option value="French">French</option>
+                                <option value="Spanish">Spanish</option>
+                                <option value="Russian">Russian</option>
+                                <option value="Portuguese">Portuguese</option>
+                                <option value="Italian">Italian</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
                             <label for="format">Audio Format</label>
                             <select id="format">
                                 <option value="mp3">MP3</option>
@@ -461,6 +489,11 @@
                                 <option value="aac">AAC</option>
                             </select>
                         </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="instruct">Voice Style Instructions <small style="color: #666;">(optional)</small></label>
+                        <textarea id="instruct" placeholder="Optional: Describe the desired voice style, e.g. 'Speak with a warm and friendly tone' or 'Read this like a news anchor'" style="min-height: 60px;"></textarea>
                     </div>
 
                     <div class="form-group">
@@ -484,12 +517,14 @@
             </section>
 
             <!-- Voice Cloning Card -->
-            <section class="card" id="voiceCloneCard" style="display: none;">
-                <h2>Voice Cloning</h2>
-                <p style="color: #888; margin-bottom: 20px; font-size: 13px;">
-                    Clone a voice from reference audio. Upload a 5-10 second audio sample and generate speech in that voice.
-                </p>
-                <form class="tts-form" id="voiceCloneForm">
+            <section class="card" id="voiceCloneCard">
+                <h2>🎙️ Voice Cloning</h2>
+                <div id="voiceCloneCapInfo" style="margin-bottom: 20px;">
+                    <p style="color: #888; font-size: 13px;">
+                        Checking voice cloning capabilities...
+                    </p>
+                </div>
+                <form class="tts-form" id="voiceCloneForm" style="display: none;">
                     <div class="form-group">
                         <label for="cloneMode">Clone Mode</label>
                         <select id="cloneMode">
@@ -683,11 +718,13 @@ response.<span class="function">stream_to_file</span>(<span class="string">"outp
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        model: 'qwen3-tts',
+                        model: document.getElementById('model').value,
                         input: text,
                         voice: document.getElementById('voice').value,
                         response_format: document.getElementById('format').value,
                         speed: parseFloat(speedSlider.value),
+                        language: document.getElementById('language').value,
+                        instruct: document.getElementById('instruct').value.trim() || null,
                     }),
                 });
 
@@ -735,9 +772,43 @@ response.<span class="function">stream_to_file</span>(<span class="string">"outp
                         option.textContent = voice.name + (voice.description ? ` - ${voice.description}` : '');
                         voiceSelect.appendChild(option);
                     });
+
+                    // Populate language dropdown from API if available
+                    if (data.languages && data.languages.length > 0) {
+                        const langSelect = document.getElementById('language');
+                        langSelect.innerHTML = '<option value="Auto">Auto-detect</option>';
+                        data.languages.forEach(lang => {
+                            const option = document.createElement('option');
+                            option.value = lang;
+                            option.textContent = lang;
+                            langSelect.appendChild(option);
+                        });
+                    }
                 }
             } catch (error) {
                 console.log('Could not load voices from API:', error);
+            }
+        }
+
+        // Load models from API
+        async function loadModels() {
+            try {
+                const response = await fetch('/v1/models');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.data && data.data.length > 0) {
+                        const modelSelect = document.getElementById('model');
+                        modelSelect.innerHTML = '';
+                        data.data.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model.id;
+                            option.textContent = model.id;
+                            modelSelect.appendChild(option);
+                        });
+                    }
+                }
+            } catch (error) {
+                console.log('Could not load models from API:', error);
             }
         }
 
@@ -799,8 +870,9 @@ response.<span class="function">stream_to_file</span>(<span class="string">"outp
             }
         }
 
-        // Load voices and backend status on page load
+        // Load voices, models and backend status on page load
         loadVoices();
+        loadModels();
         loadBackendStatus();
 
         // Voice Cloning functionality
@@ -935,18 +1007,76 @@ response.<span class="function">stream_to_file</span>(<span class="string">"outp
             cloneStatus.classList.remove('visible');
         }
 
-        // Check voice clone capabilities and show/hide the card
+        // Check voice clone capabilities and show/hide the form
         async function checkVoiceCloneCapabilities() {
+            const capInfo = document.getElementById('voiceCloneCapInfo');
+            const cloneForm = document.getElementById('voiceCloneForm');
             try {
                 const response = await fetch('/v1/audio/voice-clone/capabilities');
                 if (response.ok) {
                     const data = await response.json();
                     if (data.supported) {
-                        voiceCloneCard.style.display = 'block';
+                        let modesHtml = '';
+                        if (data.icl_mode_available) {
+                            modesHtml += '<span class="status-badge healthy" style="margin-right: 8px;">ICL Mode</span>';
+                        }
+                        if (data.x_vector_mode_available) {
+                            modesHtml += '<span class="status-badge healthy">X-Vector Mode</span>';
+                        }
+                        capInfo.innerHTML = `
+                            <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                                <span class="status-badge healthy">Supported</span>
+                                <span style="color: #888; font-size: 12px;">Model: ${data.model_type}</span>
+                            </div>
+                            <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px;">
+                                <span style="color: #888; font-size: 12px;">Available modes:</span>
+                                ${modesHtml}
+                            </div>
+                            <p style="color: #888; font-size: 13px;">
+                                Upload a 5-10 second audio sample and generate speech in that voice.
+                            </p>
+                        `;
+                        cloneForm.style.display = 'grid';
+
+                        // Update clone mode options based on available modes
+                        const modeSelect = document.getElementById('cloneMode');
+                        modeSelect.innerHTML = '';
+                        if (data.icl_mode_available) {
+                            const opt = document.createElement('option');
+                            opt.value = 'icl';
+                            opt.textContent = 'ICL Mode (Best quality - requires transcript)';
+                            modeSelect.appendChild(opt);
+                        }
+                        if (data.x_vector_mode_available) {
+                            const opt = document.createElement('option');
+                            opt.value = 'xvector';
+                            opt.textContent = 'X-Vector Mode (No transcript needed)';
+                            modeSelect.appendChild(opt);
+                        }
+                        // Trigger change to set initial ref_text visibility
+                        modeSelect.dispatchEvent(new Event('change'));
+                    } else {
+                        capInfo.innerHTML = `
+                            <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                                <span class="status-badge error">Not Supported</span>
+                                <span style="color: #888; font-size: 12px;">Model: ${data.model_type || 'unknown'}</span>
+                            </div>
+                            <p style="color: #888; font-size: 13px;">
+                                Voice cloning requires the Base model. Set 
+                                <code style="color: #00aaff; background: rgba(0,170,255,0.1); padding: 2px 6px; border-radius: 4px;">TTS_MODEL_NAME=Qwen/Qwen3-TTS-12Hz-1.7B-Base</code>
+                                and restart the server to enable this feature.
+                            </p>
+                        `;
+                        cloneForm.style.display = 'none';
                     }
+                } else {
+                    capInfo.innerHTML = '<p style="color: #ff3232; font-size: 13px;">Could not check voice cloning capabilities.</p>';
+                    cloneForm.style.display = 'none';
                 }
             } catch (error) {
                 console.log('Voice cloning not available:', error);
+                capInfo.innerHTML = '<p style="color: #888; font-size: 13px;">Voice cloning status unavailable. Server may still be starting.</p>';
+                cloneForm.style.display = 'none';
             }
         }
 
