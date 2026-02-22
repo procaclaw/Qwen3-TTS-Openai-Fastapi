@@ -295,9 +295,24 @@ async def create_speech(
         # Get content type
         content_type = get_content_type(request.response_format)
 
+        logger.info(
+            "TTS /v1/audio/speech request: model=%s voice=%s stream=%s format=%s speed=%s language=%s",
+            request.model,
+            request.voice,
+            request.stream,
+            request.response_format,
+            request.speed,
+            language,
+        )
+
         # Streaming response (coerce unsupported params instead of falling back)
         if request.stream:
             backend = await get_tts_backend()
+            logger.info(
+                "Streaming requested: backend=%s supports_streaming=%s",
+                backend.get_backend_name(),
+                backend.supports_speech_streaming(),
+            )
             if backend.supports_speech_streaming():
                 stream_speed = request.speed
                 stream_format = request.response_format
@@ -317,6 +332,13 @@ async def create_speech(
                     stream_format = "pcm"
 
                 stream_content_type = get_content_type(stream_format)
+                logger.info(
+                    "Streaming branch selected: backend=%s format=%s speed=%s content_type=%s",
+                    backend.get_backend_name(),
+                    stream_format,
+                    stream_speed,
+                    stream_content_type,
+                )
                 audio_stream = generate_speech_stream(
                     text=normalized_text,
                     voice=request.voice,
@@ -345,6 +367,11 @@ async def create_speech(
             )
 
         # Non-streaming response (existing behavior)
+        logger.info(
+            "Buffered branch selected: format=%s speed=%s",
+            request.response_format,
+            request.speed,
+        )
         audio, sample_rate = await generate_speech(
             text=normalized_text,
             voice=request.voice,
@@ -355,6 +382,12 @@ async def create_speech(
 
         # Encode audio to requested format
         audio_bytes = encode_audio(audio, request.response_format, sample_rate)
+        logger.info(
+            "Buffered response encoded: format=%s sample_rate=%s bytes=%s",
+            request.response_format,
+            sample_rate,
+            len(audio_bytes),
+        )
 
         # Return audio response
         return Response(
