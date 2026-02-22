@@ -24,7 +24,7 @@ from ..structures.schemas import (
     VoiceCloneCapabilities,
 )
 from ..services.text_processing import normalize_text
-from ..services.audio_encoding import encode_audio, get_content_type, DEFAULT_SAMPLE_RATE
+from ..services.audio_encoding import encode_audio, encode_audio_streaming, get_content_type, DEFAULT_SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
 
