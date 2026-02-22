@@ -128,6 +128,45 @@ response = client.audio.speech.create(
 response.stream_to_file("output.mp3")
 ```
 
+### Streaming Requests (`/v1/audio/speech`)
+
+Set `stream=true` to receive chunked audio with `Transfer-Encoding: chunked`.
+
+Important:
+- Streaming currently supports only `response_format` = `pcm` or `wav`
+- Compressed formats (`mp3`, `opus`, `aac`, `flac`) return `400` when `stream=true`
+- For now, streaming requires `speed=1.0`
+
+```bash
+# Stream raw PCM chunks
+curl -N -X POST "http://localhost:8880/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-tts",
+    "voice": "Vivian",
+    "input": "This is a streamed PCM response.",
+    "response_format": "pcm",
+    "stream": true,
+    "speed": 1.0
+  }' \
+  --output speech.pcm
+```
+
+```bash
+# Stream WAV (chunked response with streaming WAV header)
+curl -N -X POST "http://localhost:8880/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-tts",
+    "voice": "Vivian",
+    "input": "This is a streamed WAV response.",
+    "response_format": "wav",
+    "stream": true,
+    "speed": 1.0
+  }' \
+  --output speech.wav
+```
+
 ### Language-Specific Models
 
 You can force a specific language by using language-suffixed model names. This overrides any language parameter passed from the client (useful for integration with open-webui):

@@ -9,7 +9,7 @@ import base64
 import io
 import logging
 import time
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -208,6 +208,51 @@ async def generate_speech(
         raise RuntimeError(f"Speech generation failed: {e}")
 
 
+async def generate_speech_stream(
+    text: str,
+    voice: str,
+    language: str = "Auto",
+    instruct: Optional[str] = None,
+    speed: float = 1.0,
+) -> AsyncGenerator[tuple[np.ndarray, int], None]:
+    """
+    Stream speech chunks from the configured backend.
+
+    Returns:
+        Async generator yielding tuples of (audio_chunk, sample_rate)
+    """
+    backend = await get_tts_backend()
+
+    if not backend.supports_speech_streaming():
+        raise ValueError(
+            f"Backend '{backend.get_backend_name()}' does not support true streaming for /v1/audio/speech"
+        )
+
+    # Check custom voice BEFORE applying OpenAI alias mapping,
+    # so custom voices with OpenAI alias names remain accessible.
+    if backend.is_custom_voice(voice):
+        async for chunk in backend.generate_speech_stream(
+            text=text,
+            voice=voice,
+            language=language,
+            instruct=instruct,
+            speed=speed,
+        ):
+            yield chunk
+        return
+
+    # Map voice name (OpenAI aliases to internal names)
+    voice_name = get_voice_name(voice)
+    async for chunk in backend.generate_speech_stream(
+        text=text,
+        voice=voice_name,
+        language=language,
+        instruct=instruct,
+        speed=speed,
+    ):
+        yield chunk
+
+
 @router.post("/audio/speech")
 async def create_speech(
     request: OpenAISpeechRequest,
@@ -247,7 +292,70 @@ async def create_speech(
         model_language = extract_language_from_model(request.model)
         language = model_language if model_language else (request.language or "Auto")
         
-        # Generate speech
+        # Get content type
+        content_type = get_content_type(request.response_format)
+
+        # Streaming response
+        if request.stream:
+            if request.speed != 1.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_speed_for_streaming",
+                        "message": "Streaming currently supports speed=1.0 only",
+                        "type": "invalid_request_error",
+                    },
+                )
+
+            if request.response_format not in {"wav", "pcm"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_response_format",
+                        "message": (
+                            "Streaming currently supports only 'wav' and 'pcm' response_format values"
+                        ),
+                        "type": "invalid_request_error",
+                    },
+                )
+
+            backend = await get_tts_backend()
+            if not backend.supports_speech_streaming():
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "streaming_not_supported",
+                        "message": (
+                            f"Backend '{backend.get_backend_name()}' does not support true streaming "
+                            "for /v1/audio/speech"
+                        ),
+                        "type": "invalid_request_error",
+                    },
+                )
+
+            audio_stream = generate_speech_stream(
+                text=normalized_text,
+                voice=request.voice,
+                language=language,
+                instruct=request.instruct,
+                speed=request.speed,
+            )
+            encoded_stream = encode_audio_streaming(
+                audio_stream,
+                request.response_format,
+                DEFAULT_SAMPLE_RATE,
+            )
+
+            return StreamingResponse(
+                encoded_stream,
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
+                    "Cache-Control": "no-cache",
+                },
+            )
+
+        # Non-streaming response (existing behavior)
         audio, sample_rate = await generate_speech(
             text=normalized_text,
             voice=request.voice,
@@ -255,13 +363,10 @@ async def create_speech(
             instruct=request.instruct,
             speed=request.speed,
         )
-        
+
         # Encode audio to requested format
         audio_bytes = encode_audio(audio, request.response_format, sample_rate)
-        
-        # Get content type
-        content_type = get_content_type(request.response_format)
-        
+
         # Return audio response
         return Response(
             content=audio_bytes,

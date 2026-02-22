@@ -5,7 +5,9 @@ Tests for API endpoints.
 """
 
 import pytest
+import numpy as np
 from fastapi.testclient import TestClient
+from unittest.mock import MagicMock
 
 from api.main import app
 from api.backends.factory import reset_backend
@@ -187,6 +189,111 @@ class TestSpeechEndpoint:
             # In a real test with mocking, it would succeed
             assert "response_format" in request_data
             assert request_data["response_format"] == fmt
+
+    def test_speech_streaming_pcm_returns_streamed_audio(self, client):
+        """Test stream=true returns streaming audio bytes for supported formats."""
+        from api.backends import factory
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.supports_speech_streaming.return_value = True
+        mock_backend.is_custom_voice.return_value = False
+
+        async def fake_stream(*args, **kwargs):
+            yield np.array([0.0, 0.5], dtype=np.float32), 24000
+            yield np.array([-0.5, 1.0], dtype=np.float32), 24000
+
+        mock_backend.generate_speech_stream = fake_stream
+        factory._backend_instance = mock_backend
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello streaming world",
+                "voice": "Vivian",
+                "response_format": "pcm",
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/pcm")
+        assert response.headers["content-disposition"] == "attachment; filename=speech.pcm"
+        assert len(response.content) > 0
+
+    def test_speech_streaming_rejects_compressed_format(self, client):
+        """Test stream=true rejects compressed formats with clear validation error."""
+        from api.backends import factory
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.supports_speech_streaming.return_value = True
+        factory._backend_instance = mock_backend
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello",
+                "voice": "Vivian",
+                "response_format": "mp3",
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"] == "invalid_response_format"
+
+    def test_speech_streaming_rejects_non_default_speed(self, client):
+        """Test stream=true enforces speed=1.0 for safe chunk streaming."""
+        from api.backends import factory
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.supports_speech_streaming.return_value = True
+        factory._backend_instance = mock_backend
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello",
+                "voice": "Vivian",
+                "response_format": "pcm",
+                "stream": True,
+                "speed": 1.25,
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"] == "invalid_speed_for_streaming"
+
+    def test_speech_streaming_rejects_backend_without_streaming(self, client):
+        """Test stream=true rejects backends that do not support true streaming."""
+        from api.backends import factory
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.supports_speech_streaming.return_value = False
+        factory._backend_instance = mock_backend
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello",
+                "voice": "Vivian",
+                "response_format": "pcm",
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"] == "streaming_not_supported"
 
 
 class TestVoiceCloneEndpoints:

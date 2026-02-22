@@ -56,9 +56,10 @@ def convert_to_wav(
         audio = audio.astype(np.float32)
     
     # Normalize if needed
-    max_val = np.max(np.abs(audio))
-    if max_val > 1.0:
-        audio = audio / max_val
+    if audio.size > 0:
+        max_val = np.max(np.abs(audio))
+        if max_val > 1.0:
+            audio = audio / max_val
     
     # Convert to int16
     audio_int16 = (audio * 32767).astype(np.int16)
@@ -114,9 +115,10 @@ def convert_to_pcm(
         audio = audio.astype(np.float32)
     
     # Normalize if needed
-    max_val = np.max(np.abs(audio))
-    if max_val > 1.0:
-        audio = audio / max_val
+    if audio.size > 0:
+        max_val = np.max(np.abs(audio))
+        if max_val > 1.0:
+            audio = audio / max_val
     
     # Convert to int16
     audio_int16 = (audio * 32767).astype(np.int16)
@@ -198,6 +200,51 @@ async def encode_audio_streaming(
     Yields:
         Encoded audio chunks
     """
-    async for audio_chunk in audio_generator:
-        if audio_chunk is not None and len(audio_chunk) > 0:
-            yield encode_audio(audio_chunk, format, sample_rate)
+    if format not in {"wav", "pcm"}:
+        raise ValueError(
+            "Streaming currently supports only 'wav' and 'pcm' response_format values"
+        )
+
+    stream_sample_rate = sample_rate
+    wav_header_emitted = False
+
+    async for item in audio_generator:
+        if item is None:
+            continue
+
+        if isinstance(item, tuple):
+            audio_chunk, chunk_sample_rate = item
+            if chunk_sample_rate:
+                stream_sample_rate = int(chunk_sample_rate)
+        else:
+            audio_chunk = item
+
+        if audio_chunk is None or len(audio_chunk) == 0:
+            continue
+
+        if format == "wav" and not wav_header_emitted:
+            # Streaming WAV uses unknown-length RIFF/data sizes.
+            num_channels = 1
+            bits_per_sample = 16
+            bytes_per_sample = bits_per_sample // 8
+            byte_rate = stream_sample_rate * num_channels * bytes_per_sample
+            block_align = num_channels * bytes_per_sample
+
+            header = io.BytesIO()
+            header.write(b"RIFF")
+            header.write(struct.pack("<I", 0xFFFFFFFF))
+            header.write(b"WAVE")
+            header.write(b"fmt ")
+            header.write(struct.pack("<I", 16))
+            header.write(struct.pack("<H", 1))
+            header.write(struct.pack("<H", num_channels))
+            header.write(struct.pack("<I", stream_sample_rate))
+            header.write(struct.pack("<I", byte_rate))
+            header.write(struct.pack("<H", block_align))
+            header.write(struct.pack("<H", bits_per_sample))
+            header.write(b"data")
+            header.write(struct.pack("<I", 0xFFFFFFFF))
+            yield header.getvalue()
+            wav_header_emitted = True
+
+        yield convert_to_pcm(audio_chunk)

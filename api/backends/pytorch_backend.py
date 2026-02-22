@@ -13,7 +13,7 @@ particularly the i5-1240P and similar CPUs. It includes optimizations for:
 
 import logging
 import os
-from typing import Optional, Tuple, List, Dict, Any
+from typing import AsyncGenerator, Optional, Tuple, List, Dict, Any
 
 import numpy as np
 import torch
@@ -204,6 +204,62 @@ class PyTorchCPUBackend(TTSBackend):
         except Exception as e:
             logger.error(f"Speech generation failed: {e}")
             raise RuntimeError(f"Speech generation failed: {e}")
+
+    async def generate_speech_stream(
+        self,
+        text: str,
+        voice: str,
+        language: str = "Auto",
+        instruct: Optional[str] = None,
+        speed: float = 1.0,
+    ) -> AsyncGenerator[Tuple[np.ndarray, int], None]:
+        """Generate speech in streaming chunks using the native model stream API."""
+        if not self._ready:
+            await self.initialize()
+
+        if speed != 1.0:
+            raise RuntimeError("Streaming currently supports speed=1.0 only")
+
+        try:
+            # Base model with persisted custom voice prompt
+            if self.is_custom_voice(voice):
+                prompt_items = self._custom_voices.get(voice)
+                if prompt_items is None:
+                    raise RuntimeError(f"Custom voice '{voice}' not found")
+
+                for chunk, sr in self.model.stream_generate_voice_clone(
+                    text=text,
+                    language=language,
+                    voice_clone_prompt=prompt_items,
+                ):
+                    yield chunk.astype(np.float32), int(sr)
+                return
+
+            input_ids = self.model._tokenize_texts([self.model._build_assistant_text(text)])
+            instruct_ids = [None]
+            if instruct:
+                instruct_ids = [self.model._tokenize_texts([self.model._build_instruct_text(instruct)])[0]]
+
+            gen_kwargs = self.model._merge_generate_kwargs()
+            supported_params = {
+                "do_sample", "top_k", "top_p", "temperature",
+                "subtalker_dosample", "subtalker_top_k", "subtalker_top_p", "subtalker_temperature",
+            }
+            stream_kwargs = {k: v for k, v in gen_kwargs.items() if k in supported_params}
+
+            for chunk, sr in self.model.model.stream_generate_pcm(
+                input_ids=input_ids,
+                instruct_ids=instruct_ids,
+                languages=[language],
+                speakers=[voice],
+                non_streaming_mode=False,
+                **stream_kwargs,
+            ):
+                yield chunk.astype(np.float32), int(sr)
+
+        except Exception as e:
+            logger.error(f"Streaming speech generation failed: {e}")
+            raise RuntimeError(f"Streaming speech generation failed: {e}")
     
     def get_backend_name(self) -> str:
         """Return the name of this backend."""
@@ -271,6 +327,10 @@ class PyTorchCPUBackend(TTSBackend):
         Voice cloning requires the Base model.
         """
         return "Base" in self.model_name and "CustomVoice" not in self.model_name
+
+    def supports_speech_streaming(self) -> bool:
+        """PyTorch backend supports true speech streaming via stream_generate_pcm."""
+        return True
     
     def get_model_type(self) -> str:
         """Return the model type (base or customvoice)."""
@@ -336,3 +396,42 @@ class PyTorchCPUBackend(TTSBackend):
         except Exception as e:
             logger.error(f"Voice cloning failed: {e}")
             raise RuntimeError(f"Voice cloning failed: {e}")
+
+    async def generate_voice_clone_stream(
+        self,
+        text: str,
+        ref_audio: np.ndarray,
+        ref_audio_sr: int,
+        ref_text: Optional[str] = None,
+        language: str = "Auto",
+        x_vector_only_mode: bool = False,
+        speed: float = 1.0,
+    ) -> AsyncGenerator[Tuple[np.ndarray, int], None]:
+        """Generate voice-cloned speech in streaming chunks."""
+        if not self._ready:
+            await self.initialize()
+
+        if not self.supports_voice_cloning():
+            raise RuntimeError(
+                "Voice cloning requires the Base model (Qwen3-TTS-12Hz-*-Base). "
+                "The current model does not support voice cloning."
+            )
+        if speed != 1.0:
+            raise RuntimeError("Streaming currently supports speed=1.0 only")
+
+        try:
+            for chunk, sr in self.model.stream_generate_voice_clone(
+                text=text,
+                language=language,
+                ref_audio=(ref_audio, ref_audio_sr),
+                ref_text=ref_text,
+                x_vector_only_mode=x_vector_only_mode,
+            ):
+                yield chunk.astype(np.float32), int(sr)
+        except Exception as e:
+            logger.error(f"Streaming voice cloning failed: {e}")
+            raise RuntimeError(f"Streaming voice cloning failed: {e}")
+
+    def supports_voice_clone_streaming(self) -> bool:
+        """Voice-clone streaming is available on Base models."""
+        return self.supports_voice_cloning()

@@ -6,7 +6,7 @@ Base class for TTS backends.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, List, Dict, Any
+from typing import AsyncGenerator, Optional, Tuple, List, Dict, Any
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,29 @@ class TTSBackend(ABC):
             Tuple of (audio_array, sample_rate)
         """
         pass
+
+    async def generate_speech_stream(
+        self,
+        text: str,
+        voice: str,
+        language: str = "Auto",
+        instruct: Optional[str] = None,
+        speed: float = 1.0,
+    ) -> AsyncGenerator[Tuple[np.ndarray, int], None]:
+        """
+        Stream speech generation as audio chunks.
+
+        Default implementation falls back to non-streaming generation and yields
+        a single chunk. Backends with native streaming should override.
+        """
+        audio, sr = await self.generate_speech(
+            text=text,
+            voice=voice,
+            language=language,
+            instruct=instruct,
+            speed=speed,
+        )
+        yield audio, sr
     
     @abstractmethod
     def get_backend_name(self) -> str:
@@ -92,6 +115,14 @@ class TTSBackend(ABC):
             Dict with keys: device, gpu_available, gpu_name, vram_total, vram_used
         """
         pass
+
+    def supports_speech_streaming(self) -> bool:
+        """
+        Return whether this backend supports true chunk streaming for speech.
+
+        Backends should override when they provide native chunked generation.
+        """
+        return False
 
     def supports_voice_cloning(self) -> bool:
         """
@@ -134,6 +165,39 @@ class TTSBackend(ABC):
             NotImplementedError: If voice cloning is not supported by this backend
         """
         raise NotImplementedError("Voice cloning is not supported by this backend")
+
+    async def generate_voice_clone_stream(
+        self,
+        text: str,
+        ref_audio: np.ndarray,
+        ref_audio_sr: int,
+        ref_text: Optional[str] = None,
+        language: str = "Auto",
+        x_vector_only_mode: bool = False,
+        speed: float = 1.0,
+    ) -> AsyncGenerator[Tuple[np.ndarray, int], None]:
+        """
+        Stream voice-clone generation as audio chunks.
+
+        Default implementation falls back to non-streaming generation and yields
+        a single chunk. Backends with native streaming should override.
+        """
+        audio, sr = await self.generate_voice_clone(
+            text=text,
+            ref_audio=ref_audio,
+            ref_audio_sr=ref_audio_sr,
+            ref_text=ref_text,
+            language=language,
+            x_vector_only_mode=x_vector_only_mode,
+            speed=speed,
+        )
+        yield audio, sr
+
+    def supports_voice_clone_streaming(self) -> bool:
+        """
+        Return whether this backend supports true chunk streaming for voice clone.
+        """
+        return False
 
     async def load_custom_voices(self, custom_voices_dir: str) -> None:
         """
