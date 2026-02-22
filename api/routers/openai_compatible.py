@@ -295,65 +295,43 @@ async def create_speech(
         # Get content type
         content_type = get_content_type(request.response_format)
 
-        # Streaming response
+        # Streaming response (with graceful fallback to non-streaming)
+        fallback_reason = None
         if request.stream:
-            if request.speed != 1.0:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "invalid_speed_for_streaming",
-                        "message": "Streaming currently supports speed=1.0 only",
-                        "type": "invalid_request_error",
-                    },
-                )
-
-            if request.response_format not in {"wav", "pcm"}:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "invalid_response_format",
-                        "message": (
-                            "Streaming currently supports only 'wav' and 'pcm' response_format values"
-                        ),
-                        "type": "invalid_request_error",
-                    },
-                )
-
             backend = await get_tts_backend()
-            if not backend.supports_speech_streaming():
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "streaming_not_supported",
-                        "message": (
-                            f"Backend '{backend.get_backend_name()}' does not support true streaming "
-                            "for /v1/audio/speech"
-                        ),
-                        "type": "invalid_request_error",
+            if request.speed != 1.0:
+                fallback_reason = "streaming currently supports speed=1.0 only"
+            elif request.response_format not in {"wav", "pcm"}:
+                fallback_reason = "streaming currently supports only 'wav' and 'pcm' response_format values"
+            elif not backend.supports_speech_streaming():
+                fallback_reason = (
+                    f"backend '{backend.get_backend_name()}' does not support true streaming for /v1/audio/speech"
+                )
+
+            if fallback_reason is None:
+                audio_stream = generate_speech_stream(
+                    text=normalized_text,
+                    voice=request.voice,
+                    language=language,
+                    instruct=request.instruct,
+                    speed=request.speed,
+                )
+                encoded_stream = encode_audio_streaming(
+                    audio_stream,
+                    request.response_format,
+                    DEFAULT_SAMPLE_RATE,
+                )
+
+                return StreamingResponse(
+                    encoded_stream,
+                    media_type=content_type,
+                    headers={
+                        "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
+                        "Cache-Control": "no-cache",
                     },
                 )
 
-            audio_stream = generate_speech_stream(
-                text=normalized_text,
-                voice=request.voice,
-                language=language,
-                instruct=request.instruct,
-                speed=request.speed,
-            )
-            encoded_stream = encode_audio_streaming(
-                audio_stream,
-                request.response_format,
-                DEFAULT_SAMPLE_RATE,
-            )
-
-            return StreamingResponse(
-                encoded_stream,
-                media_type=content_type,
-                headers={
-                    "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
-                    "Cache-Control": "no-cache",
-                },
-            )
+            logger.info("Streaming fallback to buffered mode: %s", fallback_reason)
 
         # Non-streaming response (existing behavior)
         audio, sample_rate = await generate_speech(
