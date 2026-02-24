@@ -50,6 +50,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
         super().__init__()
         self.model_name = model_name
         self._ready = False
+        self._non_stream_optimizations_enabled = False
     
     async def initialize(self) -> None:
         """Initialize the backend and load the model."""
@@ -170,6 +171,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """
         if not self._ready:
             await self.initialize()
+
+        self._ensure_non_stream_optimizations()
         
         try:
             # Generate speech
@@ -194,6 +197,38 @@ class OfficialQwen3TTSBackend(TTSBackend):
         except Exception as e:
             logger.error(f"Speech generation failed: {e}")
             raise RuntimeError(f"Speech generation failed: {e}")
+
+    def _ensure_non_stream_optimizations(self) -> None:
+        """Apply non-stream optimization primitives once, matching test_optimized_no_streaming.py."""
+        if self._non_stream_optimizations_enabled:
+            return
+
+        try:
+            import torch
+        except Exception as e:
+            logger.warning(f"Could not import torch for non-stream optimizations: {e}")
+            return
+
+        if not torch.cuda.is_available():
+            return
+
+        if not hasattr(self.model, "enable_streaming_optimizations"):
+            logger.warning("Model does not expose enable_streaming_optimizations; skipping non-stream optimization setup")
+            return
+
+        try:
+            self.model.enable_streaming_optimizations(
+                decode_window_frames=300,
+                use_compile=True,
+                use_cuda_graphs=False,
+                compile_mode="max-autotune",
+                use_fast_codebook=True,
+                compile_codebook_predictor=True,
+            )
+            self._non_stream_optimizations_enabled = True
+            logger.info("Applied non-stream optimizations (max-autotune, fast codebook, compiled codebook predictor)")
+        except Exception as e:
+            logger.warning(f"Could not apply non-stream optimization setup: {e}")
 
     async def generate_speech_stream(
         self,
@@ -389,6 +424,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if not self._ready:
             await self.initialize()
 
+        self._ensure_non_stream_optimizations()
+
         if not self.supports_voice_cloning():
             raise RuntimeError(
                 "Voice cloning requires the Base model (Qwen3-TTS-12Hz-1.7B-Base). "
@@ -583,6 +620,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """Generate speech using a custom cloned voice."""
         if not self._ready:
             await self.initialize()
+
+        self._ensure_non_stream_optimizations()
 
         prompt_items = self._custom_voices.get(voice)
         if prompt_items is None:
