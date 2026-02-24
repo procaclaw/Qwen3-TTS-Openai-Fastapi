@@ -159,6 +159,7 @@ async def generate_speech(
     language: str = "Auto",
     instruct: Optional[str] = None,
     speed: float = 1.0,
+    backend=None,
 ) -> tuple[np.ndarray, int]:
     """
     Generate speech from text using the configured TTS backend.
@@ -173,7 +174,8 @@ async def generate_speech(
     Returns:
         Tuple of (audio_array, sample_rate)
     """
-    backend = await get_tts_backend()
+    if backend is None:
+        backend = await get_tts_backend()
 
     # Check custom voice BEFORE applying OpenAI alias mapping,
     # so custom voices with OpenAI alias names remain accessible.
@@ -214,6 +216,7 @@ async def generate_speech_stream(
     language: str = "Auto",
     instruct: Optional[str] = None,
     speed: float = 1.0,
+    backend=None,
 ) -> AsyncGenerator[tuple[np.ndarray, int], None]:
     """
     Stream speech chunks from the configured backend.
@@ -221,7 +224,8 @@ async def generate_speech_stream(
     Returns:
         Async generator yielding tuples of (audio_chunk, sample_rate)
     """
-    backend = await get_tts_backend()
+    if backend is None:
+        backend = await get_tts_backend()
 
     if not backend.supports_speech_streaming():
         raise ValueError(
@@ -305,9 +309,26 @@ async def create_speech(
             language,
         )
 
+        backend = await get_tts_backend()
+
+        # Base models do not support built-in speakers on /v1/audio/speech.
+        # Allow only persisted custom voices in this endpoint; users should use
+        # /v1/audio/voice-clone for ad-hoc reference cloning.
+        if backend.get_model_type() == "base" and not backend.is_custom_voice(request.voice):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "base_model_voice_not_supported",
+                    "message": (
+                        "The loaded Base model does not support built-in / OpenAI alias voices on /v1/audio/speech. "
+                        "Use a persisted custom voice name from /v1/voices, or call /v1/audio/voice-clone."
+                    ),
+                    "type": "invalid_request_error",
+                },
+            )
+
         # Streaming response (coerce unsupported params instead of falling back)
         if request.stream:
-            backend = await get_tts_backend()
             logger.info(
                 "Streaming requested: backend=%s supports_streaming=%s",
                 backend.get_backend_name(),
@@ -345,6 +366,7 @@ async def create_speech(
                     language=language,
                     instruct=request.instruct,
                     speed=stream_speed,
+                    backend=backend,
                 )
                 encoded_stream = encode_audio_streaming(
                     audio_stream,
@@ -378,6 +400,7 @@ async def create_speech(
             language=language,
             instruct=request.instruct,
             speed=request.speed,
+            backend=backend,
         )
 
         # Encode audio to requested format

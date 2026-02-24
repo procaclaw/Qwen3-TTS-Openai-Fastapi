@@ -190,6 +190,30 @@ class TestSpeechEndpoint:
             assert "response_format" in request_data
             assert request_data["response_format"] == fmt
 
+    def test_speech_base_model_requires_custom_voice_or_voice_clone(self, client):
+        """Base model should reject built-in voices on /v1/audio/speech with clear 400."""
+        from api.backends import factory
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.get_model_type.return_value = "base"
+        mock_backend.is_custom_voice.return_value = False
+        factory._backend_instance = mock_backend
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello",
+                "voice": "Vivian",
+                "response_format": "wav",
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"] == "base_model_voice_not_supported"
+
     def test_speech_streaming_pcm_returns_streamed_audio(self, client):
         """Test stream=true returns streaming audio bytes for supported formats."""
         from api.backends import factory

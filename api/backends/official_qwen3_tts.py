@@ -178,6 +178,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 language=language,
                 speaker=voice,
                 instruct=instruct,
+                non_streaming_mode=True,
             )
             
             audio = wavs[0]
@@ -403,6 +404,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 ref_text=ref_text,
                 language=language,
                 x_vector_only_mode=x_vector_only_mode,
+                non_streaming_mode=True,
             )
 
             audio = wavs[0]
@@ -591,6 +593,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 text=text,
                 language=language,
                 voice_clone_prompt=prompt_items,
+                non_streaming_mode=True,
             )
 
             audio = wavs[0]
