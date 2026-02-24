@@ -128,6 +128,7 @@ class Qwen3TTSModel:
         compile_mode: str = "reduce-overhead",
         use_fast_codebook: bool = False,  # Disabled: needs debugging, currently slower
         compile_codebook_predictor: bool = True,
+        compile_talker: bool = True,
     ):
         """
         Enable torch.compile and CUDA graphs optimizations for streaming decode.
@@ -149,6 +150,8 @@ class Qwen3TTSModel:
             use_fast_codebook: Use fast codebook generation that bypasses HuggingFace's
                                generate() overhead (default True, ~2x faster per step)
             compile_codebook_predictor: Apply torch.compile to codebook predictor (experimental)
+            compile_talker: Apply torch.compile to talker model (default True).
+                           Talker uses "default" mode internally to avoid CUDA graph conflicts.
 
         Returns:
             self for method chaining
@@ -168,6 +171,7 @@ class Qwen3TTSModel:
             compile_mode=compile_mode,
             use_fast_codebook=use_fast_codebook,
             compile_codebook_predictor=compile_codebook_predictor,
+            compile_talker=compile_talker,
         )
         return self
 

@@ -9,6 +9,7 @@ from the qwen_tts package.
 
 import logging
 import re
+import inspect
 from pathlib import Path
 from typing import AsyncGenerator, Optional, Tuple, List, Dict, Any
 import numpy as np
@@ -217,13 +218,27 @@ class OfficialQwen3TTSBackend(TTSBackend):
             return
 
         try:
+            optimize_kwargs = {
+                "decode_window_frames": 300,
+                "use_compile": True,
+                "use_cuda_graphs": False,
+                "compile_mode": "max-autotune",
+                "use_fast_codebook": True,
+                "compile_codebook_predictor": True,
+            }
+
+            # Backward compatibility: pass compile_talker only when supported.
+            try:
+                sig = inspect.signature(self.model.enable_streaming_optimizations)
+                if "compile_talker" in sig.parameters:
+                    optimize_kwargs["compile_talker"] = True
+                else:
+                    logger.info("compile_talker not supported by loaded qwen_tts; continuing without it")
+            except Exception as sig_err:
+                logger.warning(f"Could not inspect optimization signature: {sig_err}")
+
             self.model.enable_streaming_optimizations(
-                decode_window_frames=300,
-                use_compile=True,
-                use_cuda_graphs=False,
-                compile_mode="max-autotune",
-                use_fast_codebook=True,
-                compile_codebook_predictor=True,
+                **optimize_kwargs,
             )
             self._non_stream_optimizations_enabled = True
             logger.info("Applied non-stream optimizations (max-autotune, fast codebook, compiled codebook predictor)")
