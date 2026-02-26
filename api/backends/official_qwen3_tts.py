@@ -10,6 +10,7 @@ from the qwen_tts package.
 import logging
 import re
 import inspect
+import os
 from pathlib import Path
 from typing import AsyncGenerator, Optional, Tuple, List, Dict, Any
 import numpy as np
@@ -51,7 +52,11 @@ class OfficialQwen3TTSBackend(TTSBackend):
         super().__init__()
         self.model_name = model_name
         self._ready = False
-        self._non_stream_optimizations_enabled = False
+        # Streaming defaults tuned for low-latency chunking with stable quality.
+        self._stream_emit_every_frames = 4
+        self._stream_decode_window_frames = 80
+        self._streaming_optimizations_enabled = False
+        self._streaming_optimizations_attempted = False
     
     async def initialize(self) -> None:
         """Initialize the backend and load the model."""
@@ -172,8 +177,6 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """
         if not self._ready:
             await self.initialize()
-
-        self._ensure_non_stream_optimizations()
         
         try:
             # Generate speech
@@ -199,31 +202,50 @@ class OfficialQwen3TTSBackend(TTSBackend):
             logger.error(f"Speech generation failed: {e}")
             raise RuntimeError(f"Speech generation failed: {e}")
 
-    def _ensure_non_stream_optimizations(self) -> None:
-        """Apply non-stream optimization primitives once, matching test_optimized_no_streaming.py."""
-        if self._non_stream_optimizations_enabled:
+    def _resolve_stream_compile_mode(self) -> str:
+        """
+        Resolve compile mode for streaming optimizations.
+
+        Default stays "reduce-overhead". Set TTS_STREAM_COMPILE_MODE=max-autotune
+        to override for experimentation.
+        """
+        mode = os.getenv("TTS_STREAM_COMPILE_MODE", "reduce-overhead").strip().lower()
+        if mode in {"reduce-overhead", "max-autotune"}:
+            return mode
+
+        logger.warning(
+            "Unsupported TTS_STREAM_COMPILE_MODE=%r; falling back to reduce-overhead "
+            "(supported: reduce-overhead, max-autotune)",
+            mode,
+        )
+        return "reduce-overhead"
+
+    def _ensure_streaming_optimizations(self) -> None:
+        """Apply streaming optimizations once for /v1/audio/speech stream=true path."""
+        if self._streaming_optimizations_enabled or self._streaming_optimizations_attempted:
             return
+        self._streaming_optimizations_attempted = True
 
         try:
             import torch
         except Exception as e:
-            logger.warning(f"Could not import torch for non-stream optimizations: {e}")
+            logger.warning(f"Could not import torch for streaming optimizations: {e}")
             return
 
         if not torch.cuda.is_available():
+            logger.info("CUDA unavailable; skipping streaming compile optimizations")
             return
-
         if not hasattr(self.model, "enable_streaming_optimizations"):
-            logger.warning("Model does not expose enable_streaming_optimizations; skipping non-stream optimization setup")
+            logger.warning("Model does not expose enable_streaming_optimizations; skipping streaming optimization setup")
             return
 
         try:
+            compile_mode = self._resolve_stream_compile_mode()
             optimize_kwargs = {
-                "decode_window_frames": 300,
+                "decode_window_frames": self._stream_decode_window_frames,
                 "use_compile": True,
                 "use_cuda_graphs": False,
-                "compile_mode": "max-autotune",
-                "use_fast_codebook": True,
+                "compile_mode": compile_mode,
                 "compile_codebook_predictor": True,
             }
 
@@ -240,10 +262,17 @@ class OfficialQwen3TTSBackend(TTSBackend):
             self.model.enable_streaming_optimizations(
                 **optimize_kwargs,
             )
-            self._non_stream_optimizations_enabled = True
-            logger.info("Applied non-stream optimizations (max-autotune, fast codebook, compiled codebook predictor)")
+            self._streaming_optimizations_enabled = True
+            logger.info(
+                "Applied streaming optimizations once (compile_mode=%s, decode_window_frames=%s, "
+                "emit_every_frames=%s, compile_codebook_predictor=True)",
+                compile_mode,
+                self._stream_decode_window_frames,
+                self._stream_emit_every_frames,
+            )
+            logger.info("First streaming request after compile setup may be slower due to graph/compile warmup")
         except Exception as e:
-            logger.warning(f"Could not apply non-stream optimization setup: {e}")
+            logger.warning(f"Could not apply streaming optimization setup: {e}")
 
     async def generate_speech_stream(
         self,
@@ -260,6 +289,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if speed != 1.0:
             raise RuntimeError("Streaming currently supports speed=1.0 only")
 
+        self._ensure_streaming_optimizations()
+
         try:
             # Base model with persisted custom voice prompt
             if self.is_custom_voice(voice):
@@ -271,6 +302,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
                     text=text,
                     language=language,
                     voice_clone_prompt=prompt_items,
+                    emit_every_frames=self._stream_emit_every_frames,
+                    decode_window_frames=self._stream_decode_window_frames,
                 ):
                     yield chunk.astype(np.float32), int(sr)
                 return
@@ -294,6 +327,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 languages=[language],
                 speakers=[voice],
                 non_streaming_mode=False,
+                emit_every_frames=self._stream_emit_every_frames,
+                decode_window_frames=self._stream_decode_window_frames,
                 **stream_kwargs,
             ):
                 yield chunk.astype(np.float32), int(sr)
@@ -439,8 +474,6 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if not self._ready:
             await self.initialize()
 
-        self._ensure_non_stream_optimizations()
-
         if not self.supports_voice_cloning():
             raise RuntimeError(
                 "Voice cloning requires the Base model (Qwen3-TTS-12Hz-1.7B-Base). "
@@ -495,6 +528,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if speed != 1.0:
             raise RuntimeError("Streaming currently supports speed=1.0 only")
 
+        self._ensure_streaming_optimizations()
+
         try:
             for chunk, sr in self.model.stream_generate_voice_clone(
                 text=text,
@@ -502,6 +537,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 ref_audio=(ref_audio, ref_audio_sr),
                 ref_text=ref_text,
                 x_vector_only_mode=x_vector_only_mode,
+                emit_every_frames=self._stream_emit_every_frames,
+                decode_window_frames=self._stream_decode_window_frames,
             ):
                 yield chunk.astype(np.float32), int(sr)
         except Exception as e:
@@ -635,8 +672,6 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """Generate speech using a custom cloned voice."""
         if not self._ready:
             await self.initialize()
-
-        self._ensure_non_stream_optimizations()
 
         prompt_items = self._custom_voices.get(voice)
         if prompt_items is None:
