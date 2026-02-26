@@ -101,6 +101,8 @@ The official backend includes several production-ready optimizations for maximum
 
 ⚠️ **Note**: torch.compile() and cuDNN benchmarking require warmup. First 2-3 requests may be slower (~10-30s) while optimizations initialize.
 
+⚠️ **Mode warmup behavior (single model instance):** when switching between buffered (`stream=false`) and streaming (`stream=true`) workloads, whichever mode is exercised first after restart may get better warm-state performance, while the other mode can be slightly slower. For best results, run a quick warmup request in the mode you care about most, and benchmark both modes after restart.
+
 📖 **See [OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md)** for detailed information about each optimization, how to enable/disable them, and troubleshooting tips.
 
 ## 🚀 Quick Start (API Server)
