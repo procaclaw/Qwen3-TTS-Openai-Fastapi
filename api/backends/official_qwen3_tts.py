@@ -213,11 +213,10 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """
         Resolve whether to compile talker forward.
 
-        Talker compilation is disabled by default to avoid Dynamo graph churn when
-        switching between buffered (`no_grad`) and streaming (`inference_mode`)
-        execution paths. Advanced users can opt in with TTS_COMPILE_TALKER=1.
+        Talker compilation is enabled by default. Set TTS_COMPILE_TALKER=0
+        to disable if needed.
         """
-        raw = os.getenv("TTS_COMPILE_TALKER", "0").strip().lower()
+        raw = os.getenv("TTS_COMPILE_TALKER", "1").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
     def _ensure_optimizations(self) -> None:

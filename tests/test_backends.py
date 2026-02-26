@@ -454,7 +454,7 @@ class TestOfficialBackendOptimizations:
         assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
-        assert kwargs["compile_talker"] is False
+        assert kwargs["compile_talker"] is True
 
     def test_unified_generation_honors_compile_mode_env(self, monkeypatch):
         """Optimization setup should honor TTS_COMPILE_MODE when valid."""
@@ -518,11 +518,11 @@ class TestOfficialBackendOptimizations:
 
         assert backend._resolve_compile_mode() == "reduce-overhead"
 
-    def test_unified_compile_talker_defaults_to_false(self, monkeypatch):
-        """Talker compile should default to disabled for stability."""
+    def test_unified_compile_talker_defaults_to_true(self, monkeypatch):
+        """Talker compile should default to enabled."""
         monkeypatch.delenv("TTS_COMPILE_TALKER", raising=False)
         backend = OfficialQwen3TTSBackend()
-        assert backend._resolve_compile_talker() is False
+        assert backend._resolve_compile_talker() is True
 
     def test_buffered_then_streaming_reuses_unified_optimization_config(self, monkeypatch):
         """Buffered then streaming should not re-run optimization setup."""
@@ -569,7 +569,7 @@ class TestOfficialBackendOptimizations:
         assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
-        assert kwargs["compile_talker"] is False
+        assert kwargs["compile_talker"] is True
 
     def test_streaming_then_buffered_reuses_unified_optimization_config(self, monkeypatch):
         """Streaming then buffered should not re-run optimization setup."""
@@ -607,4 +607,4 @@ class TestOfficialBackendOptimizations:
         assert len(chunks) == 1
         assert len(optimize_calls) == 1
         assert optimize_calls[0]["compile_mode"] == "reduce-overhead"
-        assert optimize_calls[0]["compile_talker"] is False
+        assert optimize_calls[0]["compile_talker"] is True
