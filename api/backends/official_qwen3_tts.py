@@ -123,20 +123,6 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 else:
                     raise RuntimeError(f"Failed to load model with any attention implementation. Last error: {last_error}")
 
-            # Apply torch.compile() optimization for faster inference
-            if torch.cuda.is_available() and hasattr(torch, 'compile'):
-                logger.info("Applying torch.compile() optimization...")
-                try:
-                    # Compile the model with reduce-overhead mode for faster inference
-                    self.model.model = torch.compile(
-                        self.model.model,
-                        mode="reduce-overhead",  # Optimize for inference speed
-                        fullgraph=False,  # Allow graph breaks for compatibility
-                    )
-                    logger.info("torch.compile() optimization applied successfully")
-                except Exception as e:
-                    logger.warning(f"Could not apply torch.compile(): {e}")
-            
             # Enable cuDNN benchmarking for optimal convolution algorithms
             if torch.cuda.is_available():
                 torch.backends.cudnn.benchmark = True
@@ -223,6 +209,17 @@ class OfficialQwen3TTSBackend(TTSBackend):
         )
         return "reduce-overhead"
 
+    def _resolve_compile_talker(self) -> bool:
+        """
+        Resolve whether to compile talker forward.
+
+        Talker compilation is disabled by default to avoid Dynamo graph churn when
+        switching between buffered (`no_grad`) and streaming (`inference_mode`)
+        execution paths. Advanced users can opt in with TTS_COMPILE_TALKER=1.
+        """
+        raw = os.getenv("TTS_COMPILE_TALKER", "0").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
     def _ensure_optimizations(self) -> None:
         """Apply one shared optimization setup once for all generation paths."""
         if self._optimizations_enabled or self._optimizations_attempted:
@@ -244,6 +241,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
 
         try:
             compile_mode = self._resolve_compile_mode()
+            compile_talker = self._resolve_compile_talker()
             optimize_kwargs = {
                 "decode_window_frames": self._optimization_decode_window_frames,
                 "use_compile": True,
@@ -257,7 +255,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
             try:
                 sig = inspect.signature(self.model.enable_streaming_optimizations)
                 if "compile_talker" in sig.parameters:
-                    optimize_kwargs["compile_talker"] = True
+                    optimize_kwargs["compile_talker"] = compile_talker
                 else:
                     logger.info("compile_talker not supported by loaded qwen_tts; continuing without it")
             except Exception as sig_err:
@@ -268,9 +266,10 @@ class OfficialQwen3TTSBackend(TTSBackend):
             logger.info(
                 "Applied unified optimizations once (compile_mode=%s, decode_window_frames=%s, "
                 "use_compile=True, use_cuda_graphs=False, use_fast_codebook=True, "
-                "compile_codebook_predictor=True)",
+                "compile_codebook_predictor=True, compile_talker=%s)",
                 compile_mode,
                 self._optimization_decode_window_frames,
+                compile_talker,
             )
             logger.info("First request after compile setup may be slower due to compile warmup")
         except Exception as e:

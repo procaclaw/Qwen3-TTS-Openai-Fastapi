@@ -385,6 +385,44 @@ class TestBackendErrorHandling:
 class TestOfficialBackendOptimizations:
     """Regression tests for unified optimization setup across generation paths."""
 
+    def test_initialize_does_not_compile_top_level_model(self, monkeypatch):
+        """Initialization should not call legacy top-level torch.compile."""
+        backend = OfficialQwen3TTSBackend()
+
+        compile_calls = []
+
+        def _compile_should_not_run(*args, **kwargs):
+            compile_calls.append((args, kwargs))
+            raise AssertionError("torch.compile should not be called during initialize")
+
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: True),
+            bfloat16=object(),
+            float32=object(),
+            compile=_compile_should_not_run,
+            backends=types.SimpleNamespace(
+                cudnn=types.SimpleNamespace(benchmark=False, allow_tf32=False),
+                cuda=types.SimpleNamespace(matmul=types.SimpleNamespace(allow_tf32=False)),
+            ),
+        )
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        class DummyLoadedModel:
+            pass
+
+        class DummyQwen3TTSModel:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return DummyLoadedModel()
+
+        fake_qwen_tts = types.SimpleNamespace(Qwen3TTSModel=DummyQwen3TTSModel)
+        monkeypatch.setitem(sys.modules, "qwen_tts", fake_qwen_tts)
+
+        asyncio.run(backend.initialize())
+
+        assert backend._ready is True
+        assert len(compile_calls) == 0
+
     def test_unified_optimization_applies_once_with_shared_defaults(self, monkeypatch):
         """Buffered generation should initialize shared optimization flags once."""
         backend = OfficialQwen3TTSBackend()
@@ -416,7 +454,7 @@ class TestOfficialBackendOptimizations:
         assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
-        assert kwargs["compile_talker"] is True
+        assert kwargs["compile_talker"] is False
 
     def test_unified_generation_honors_compile_mode_env(self, monkeypatch):
         """Optimization setup should honor TTS_COMPILE_MODE when valid."""
@@ -428,7 +466,8 @@ class TestOfficialBackendOptimizations:
         optimize_calls = []
 
         class DummyModel:
-            def enable_streaming_optimizations(self, **kwargs):
+            def enable_streaming_optimizations(self, compile_talker=None, **kwargs):
+                kwargs["compile_talker"] = compile_talker
                 optimize_calls.append(kwargs)
 
             def generate_custom_voice(self, **kwargs):
@@ -444,6 +483,33 @@ class TestOfficialBackendOptimizations:
         assert len(optimize_calls) == 1
         assert optimize_calls[0]["compile_mode"] == "max-autotune"
 
+    def test_unified_generation_honors_compile_talker_opt_in_env(self, monkeypatch):
+        """Optimization setup should opt in to talker compile when requested."""
+        monkeypatch.setenv("TTS_COMPILE_TALKER", "1")
+
+        backend = OfficialQwen3TTSBackend()
+        backend._ready = True
+
+        optimize_calls = []
+
+        class DummyModel:
+            def enable_streaming_optimizations(self, compile_talker=None, **kwargs):
+                kwargs["compile_talker"] = compile_talker
+                optimize_calls.append(kwargs)
+
+            def generate_custom_voice(self, **kwargs):
+                return [np.zeros(8, dtype=np.float32)], 24000
+
+        backend.model = DummyModel()
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        asyncio.run(backend.generate_speech(text="hello", voice="Vivian"))
+
+        assert len(optimize_calls) == 1
+        assert optimize_calls[0]["compile_talker"] is True
+
     def test_unified_compile_mode_invalid_env_falls_back_to_reduce_overhead(self, monkeypatch):
         """Invalid compile mode should fall back to reduce-overhead."""
         monkeypatch.setenv("TTS_COMPILE_MODE", "invalid-mode")
@@ -451,6 +517,12 @@ class TestOfficialBackendOptimizations:
         backend = OfficialQwen3TTSBackend()
 
         assert backend._resolve_compile_mode() == "reduce-overhead"
+
+    def test_unified_compile_talker_defaults_to_false(self, monkeypatch):
+        """Talker compile should default to disabled for stability."""
+        monkeypatch.delenv("TTS_COMPILE_TALKER", raising=False)
+        backend = OfficialQwen3TTSBackend()
+        assert backend._resolve_compile_talker() is False
 
     def test_buffered_then_streaming_reuses_unified_optimization_config(self, monkeypatch):
         """Buffered then streaming should not re-run optimization setup."""
@@ -461,7 +533,8 @@ class TestOfficialBackendOptimizations:
         stream_calls = []
 
         class DummyModel:
-            def enable_streaming_optimizations(self, **kwargs):
+            def enable_streaming_optimizations(self, compile_talker=None, **kwargs):
+                kwargs["compile_talker"] = compile_talker
                 optimize_calls.append(kwargs)
 
             def generate_custom_voice(self, **kwargs):
@@ -496,6 +569,7 @@ class TestOfficialBackendOptimizations:
         assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
+        assert kwargs["compile_talker"] is False
 
     def test_streaming_then_buffered_reuses_unified_optimization_config(self, monkeypatch):
         """Streaming then buffered should not re-run optimization setup."""
@@ -505,7 +579,8 @@ class TestOfficialBackendOptimizations:
         optimize_calls = []
 
         class DummyModel:
-            def enable_streaming_optimizations(self, **kwargs):
+            def enable_streaming_optimizations(self, compile_talker=None, **kwargs):
+                kwargs["compile_talker"] = compile_talker
                 optimize_calls.append(kwargs)
 
             def generate_custom_voice(self, **kwargs):
@@ -532,3 +607,4 @@ class TestOfficialBackendOptimizations:
         assert len(chunks) == 1
         assert len(optimize_calls) == 1
         assert optimize_calls[0]["compile_mode"] == "reduce-overhead"
+        assert optimize_calls[0]["compile_talker"] is False

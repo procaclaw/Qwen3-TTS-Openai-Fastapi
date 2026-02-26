@@ -2523,7 +2523,10 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
 
         return talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed
 
-    @torch.no_grad()
+    # Keep buffered and streaming execution in the same mode to prevent
+    # dispatch-key mismatches and inference-tensor errors when compiled
+    # talker paths are reused across request types.
+    @torch.inference_mode()
     def generate(
         self,
         input_ids: Optional[list[torch.Tensor]] = None,
