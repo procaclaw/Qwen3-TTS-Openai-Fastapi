@@ -225,6 +225,24 @@ class OfficialQwen3TTSBackend(TTSBackend):
         )
         return "reduce-overhead"
 
+    def _resolve_buffered_compile_mode(self) -> str:
+        """
+        Resolve compile mode for buffered optimizations.
+
+        Default is "reduce-overhead" for stability. Set
+        TTS_BUFFERED_COMPILE_MODE=max-autotune to override for experimentation.
+        """
+        mode = os.getenv("TTS_BUFFERED_COMPILE_MODE", "reduce-overhead").strip().lower()
+        if mode in {"reduce-overhead", "max-autotune"}:
+            return mode
+
+        logger.warning(
+            "Unsupported TTS_BUFFERED_COMPILE_MODE=%r; falling back to reduce-overhead "
+            "(supported: reduce-overhead, max-autotune)",
+            mode,
+        )
+        return "reduce-overhead"
+
     def _ensure_streaming_optimizations(self) -> None:
         """Apply streaming optimizations once for /v1/audio/speech stream=true path."""
         if self._streaming_optimizations_enabled or self._streaming_optimizations_attempted:
@@ -299,11 +317,12 @@ class OfficialQwen3TTSBackend(TTSBackend):
             return
 
         try:
+            compile_mode = self._resolve_buffered_compile_mode()
             optimize_kwargs = {
                 "decode_window_frames": self._buffered_decode_window_frames,
                 "use_compile": True,
                 "use_cuda_graphs": False,
-                "compile_mode": "max-autotune",
+                "compile_mode": compile_mode,
                 "use_fast_codebook": True,
                 "compile_codebook_predictor": True,
             }
@@ -321,8 +340,9 @@ class OfficialQwen3TTSBackend(TTSBackend):
             self.model.enable_streaming_optimizations(**optimize_kwargs)
             self._buffered_optimizations_enabled = True
             logger.info(
-                "Applied buffered optimizations once (compile_mode=max-autotune, decode_window_frames=%s, "
+                "Applied buffered optimizations once (compile_mode=%s, decode_window_frames=%s, "
                 "use_fast_codebook=True, use_cuda_graphs=False)",
+                compile_mode,
                 self._buffered_decode_window_frames,
             )
             logger.info("First buffered request after compile setup may be slower due to compile warmup")

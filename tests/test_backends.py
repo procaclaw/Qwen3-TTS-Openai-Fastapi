@@ -412,9 +412,43 @@ class TestOfficialBackendOptimizations:
         assert kwargs["decode_window_frames"] == 300
         assert kwargs["use_compile"] is True
         assert kwargs["use_cuda_graphs"] is False
-        assert kwargs["compile_mode"] == "max-autotune"
+        assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
+
+    def test_buffered_generation_honors_buffered_compile_mode_env(self, monkeypatch):
+        """Buffered generation should honor TTS_BUFFERED_COMPILE_MODE when valid."""
+        monkeypatch.setenv("TTS_BUFFERED_COMPILE_MODE", "max-autotune")
+
+        backend = OfficialQwen3TTSBackend()
+        backend._ready = True
+
+        optimize_calls = []
+
+        class DummyModel:
+            def enable_streaming_optimizations(self, **kwargs):
+                optimize_calls.append(kwargs)
+
+            def generate_custom_voice(self, **kwargs):
+                return [np.zeros(8, dtype=np.float32)], 24000
+
+        backend.model = DummyModel()
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        asyncio.run(backend.generate_speech(text="hello", voice="Vivian"))
+
+        assert len(optimize_calls) == 1
+        assert optimize_calls[0]["compile_mode"] == "max-autotune"
+
+    def test_buffered_compile_mode_invalid_env_falls_back_to_reduce_overhead(self, monkeypatch):
+        """Invalid buffered compile mode should fall back to reduce-overhead."""
+        monkeypatch.setenv("TTS_BUFFERED_COMPILE_MODE", "invalid-mode")
+
+        backend = OfficialQwen3TTSBackend()
+
+        assert backend._resolve_buffered_compile_mode() == "reduce-overhead"
 
     def test_streaming_generation_keeps_streaming_optimization_profile(self, monkeypatch):
         """Streaming generation should keep existing streaming optimization flags."""

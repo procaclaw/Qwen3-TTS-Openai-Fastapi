@@ -284,6 +284,7 @@ The server will start on `http://0.0.0.0:8880` by default.
 - `TTS_MODEL_NAME` - Override default model (optional)
 - `TTS_WARMUP_ON_START` - Warmup on startup: `true` or `false` (default: `false`)
 - `TTS_STREAM_COMPILE_MODE` - Streaming compile mode for official backend: `reduce-overhead` (default) or `max-autotune`
+- `TTS_BUFFERED_COMPILE_MODE` - Buffered (non-streaming) compile mode for official backend: `reduce-overhead` (default) or `max-autotune`
 - `ENABLE_VOICE_STUDIO` - Mount Voice Studio at `/voice-studio`: `true` or `false` (default: `false`)
 - `VOICE_LIBRARY_DIR` - Directory for storing voice profiles (default: `./voice_library`)
 
