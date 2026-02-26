@@ -44,6 +44,15 @@ PROMPTS = [
      "Text-to-speech technology has advanced significantly in recent years. "
      "Modern neural networks can generate remarkably natural-sounding speech. "
      "The Qwen3-TTS model represents the latest breakthrough in this field."),
+    ("very long paragraph",
+     "Artificial intelligence has revolutionized the way we interact with technology. "
+     "Text-to-speech technology has advanced significantly in recent years. "
+     "Modern neural networks can generate remarkably natural-sounding speech. "
+     "The Qwen3-TTS model represents the latest breakthrough in this field."
+	 "So now that we are here it's good to actually check how it's performing. "
+	 "Maybe it is not terrible but maybe it's not good either. "
+	 "Either way this should be enough for the tests or maybe we should do one more? "
+	 "I guess this is good enough not terribly long but not short either if it can do this under 30 seconds we are gucci. "),
 ]
 
 
