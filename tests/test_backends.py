@@ -383,17 +383,18 @@ class TestBackendErrorHandling:
 
 
 class TestOfficialBackendOptimizations:
-    """Regression tests for streaming vs buffered optimization setup."""
+    """Regression tests for unified optimization setup across generation paths."""
 
-    def test_buffered_generation_applies_buffered_optimization_profile_once(self, monkeypatch):
-        """Buffered generation should enable non-stream optimization flags once."""
+    def test_unified_optimization_applies_once_with_shared_defaults(self, monkeypatch):
+        """Buffered generation should initialize shared optimization flags once."""
         backend = OfficialQwen3TTSBackend()
         backend._ready = True
 
         optimize_calls = []
 
         class DummyModel:
-            def enable_streaming_optimizations(self, **kwargs):
+            def enable_streaming_optimizations(self, compile_talker=None, **kwargs):
+                kwargs["compile_talker"] = compile_talker
                 optimize_calls.append(kwargs)
 
             def generate_custom_voice(self, **kwargs):
@@ -409,16 +410,17 @@ class TestOfficialBackendOptimizations:
 
         assert len(optimize_calls) == 1
         kwargs = optimize_calls[0]
-        assert kwargs["decode_window_frames"] == 300
+        assert kwargs["decode_window_frames"] == 80
         assert kwargs["use_compile"] is True
         assert kwargs["use_cuda_graphs"] is False
         assert kwargs["compile_mode"] == "reduce-overhead"
         assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
+        assert kwargs["compile_talker"] is True
 
-    def test_buffered_generation_honors_buffered_compile_mode_env(self, monkeypatch):
-        """Buffered generation should honor TTS_BUFFERED_COMPILE_MODE when valid."""
-        monkeypatch.setenv("TTS_BUFFERED_COMPILE_MODE", "max-autotune")
+    def test_unified_generation_honors_compile_mode_env(self, monkeypatch):
+        """Optimization setup should honor TTS_COMPILE_MODE when valid."""
+        monkeypatch.setenv("TTS_COMPILE_MODE", "max-autotune")
 
         backend = OfficialQwen3TTSBackend()
         backend._ready = True
@@ -442,26 +444,31 @@ class TestOfficialBackendOptimizations:
         assert len(optimize_calls) == 1
         assert optimize_calls[0]["compile_mode"] == "max-autotune"
 
-    def test_buffered_compile_mode_invalid_env_falls_back_to_reduce_overhead(self, monkeypatch):
-        """Invalid buffered compile mode should fall back to reduce-overhead."""
-        monkeypatch.setenv("TTS_BUFFERED_COMPILE_MODE", "invalid-mode")
+    def test_unified_compile_mode_invalid_env_falls_back_to_reduce_overhead(self, monkeypatch):
+        """Invalid compile mode should fall back to reduce-overhead."""
+        monkeypatch.setenv("TTS_COMPILE_MODE", "invalid-mode")
 
         backend = OfficialQwen3TTSBackend()
 
-        assert backend._resolve_buffered_compile_mode() == "reduce-overhead"
+        assert backend._resolve_compile_mode() == "reduce-overhead"
 
-    def test_streaming_generation_keeps_streaming_optimization_profile(self, monkeypatch):
-        """Streaming generation should keep existing streaming optimization flags."""
+    def test_buffered_then_streaming_reuses_unified_optimization_config(self, monkeypatch):
+        """Buffered then streaming should not re-run optimization setup."""
         backend = OfficialQwen3TTSBackend()
         backend._ready = True
 
         optimize_calls = []
+        stream_calls = []
 
         class DummyModel:
             def enable_streaming_optimizations(self, **kwargs):
                 optimize_calls.append(kwargs)
 
+            def generate_custom_voice(self, **kwargs):
+                return [np.zeros(8, dtype=np.float32)], 24000
+
             def stream_generate_voice_clone(self, **kwargs):
+                stream_calls.append(kwargs)
                 yield np.zeros(4, dtype=np.float32), 24000
 
         backend.model = DummyModel()
@@ -472,6 +479,7 @@ class TestOfficialBackendOptimizations:
 
         async def _collect_stream():
             chunks = []
+            await backend.generate_speech(text="buffered", voice="Vivian")
             async for chunk, sr in backend.generate_speech_stream(text="streaming", voice="voice1"):
                 chunks.append((chunk, sr))
             return chunks
@@ -480,10 +488,47 @@ class TestOfficialBackendOptimizations:
 
         assert len(chunks) == 1
         assert len(optimize_calls) == 1
+        assert len(stream_calls) == 1
         kwargs = optimize_calls[0]
         assert kwargs["decode_window_frames"] == 80
         assert kwargs["use_compile"] is True
         assert kwargs["use_cuda_graphs"] is False
         assert kwargs["compile_mode"] == "reduce-overhead"
+        assert kwargs["use_fast_codebook"] is True
         assert kwargs["compile_codebook_predictor"] is True
-        assert "use_fast_codebook" not in kwargs
+
+    def test_streaming_then_buffered_reuses_unified_optimization_config(self, monkeypatch):
+        """Streaming then buffered should not re-run optimization setup."""
+        backend = OfficialQwen3TTSBackend()
+        backend._ready = True
+
+        optimize_calls = []
+
+        class DummyModel:
+            def enable_streaming_optimizations(self, **kwargs):
+                optimize_calls.append(kwargs)
+
+            def generate_custom_voice(self, **kwargs):
+                return [np.zeros(8, dtype=np.float32)], 24000
+
+            def stream_generate_voice_clone(self, **kwargs):
+                yield np.zeros(4, dtype=np.float32), 24000
+
+        backend.model = DummyModel()
+        backend._custom_voices["voice1"] = [{"dummy": True}]
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        async def _run_both():
+            chunks = []
+            async for chunk, sr in backend.generate_speech_stream(text="streaming", voice="voice1"):
+                chunks.append((chunk, sr))
+            await backend.generate_speech(text="buffered", voice="Vivian")
+            return chunks
+
+        chunks = asyncio.run(_run_both())
+
+        assert len(chunks) == 1
+        assert len(optimize_calls) == 1
+        assert optimize_calls[0]["compile_mode"] == "reduce-overhead"

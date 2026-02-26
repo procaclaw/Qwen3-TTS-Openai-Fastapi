@@ -55,11 +55,9 @@ class OfficialQwen3TTSBackend(TTSBackend):
         # Streaming defaults tuned for low-latency chunking with stable quality.
         self._stream_emit_every_frames = 4
         self._stream_decode_window_frames = 80
-        self._streaming_optimizations_enabled = False
-        self._streaming_optimizations_attempted = False
-        self._buffered_decode_window_frames = 300
-        self._buffered_optimizations_enabled = False
-        self._buffered_optimizations_attempted = False
+        self._optimization_decode_window_frames = 80
+        self._optimizations_enabled = False
+        self._optimizations_attempted = False
     
     async def initialize(self) -> None:
         """Initialize the backend and load the model."""
@@ -181,7 +179,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if not self._ready:
             await self.initialize()
 
-        self._ensure_buffered_optimizations()
+        self._ensure_optimizations()
         
         try:
             # Generate speech
@@ -207,119 +205,47 @@ class OfficialQwen3TTSBackend(TTSBackend):
             logger.error(f"Speech generation failed: {e}")
             raise RuntimeError(f"Speech generation failed: {e}")
 
-    def _resolve_stream_compile_mode(self) -> str:
+    def _resolve_compile_mode(self) -> str:
         """
-        Resolve compile mode for streaming optimizations.
+        Resolve compile mode for backend optimization initialization.
 
-        Default stays "reduce-overhead". Set TTS_STREAM_COMPILE_MODE=max-autotune
+        Default stays "reduce-overhead". Set TTS_COMPILE_MODE=max-autotune
         to override for experimentation.
         """
-        mode = os.getenv("TTS_STREAM_COMPILE_MODE", "reduce-overhead").strip().lower()
+        mode = os.getenv("TTS_COMPILE_MODE", "reduce-overhead").strip().lower()
         if mode in {"reduce-overhead", "max-autotune"}:
             return mode
 
         logger.warning(
-            "Unsupported TTS_STREAM_COMPILE_MODE=%r; falling back to reduce-overhead "
+            "Unsupported TTS_COMPILE_MODE=%r; falling back to reduce-overhead "
             "(supported: reduce-overhead, max-autotune)",
             mode,
         )
         return "reduce-overhead"
 
-    def _resolve_buffered_compile_mode(self) -> str:
-        """
-        Resolve compile mode for buffered optimizations.
-
-        Default is "reduce-overhead" for stability. Set
-        TTS_BUFFERED_COMPILE_MODE=max-autotune to override for experimentation.
-        """
-        mode = os.getenv("TTS_BUFFERED_COMPILE_MODE", "reduce-overhead").strip().lower()
-        if mode in {"reduce-overhead", "max-autotune"}:
-            return mode
-
-        logger.warning(
-            "Unsupported TTS_BUFFERED_COMPILE_MODE=%r; falling back to reduce-overhead "
-            "(supported: reduce-overhead, max-autotune)",
-            mode,
-        )
-        return "reduce-overhead"
-
-    def _ensure_streaming_optimizations(self) -> None:
-        """Apply streaming optimizations once for /v1/audio/speech stream=true path."""
-        if self._streaming_optimizations_enabled or self._streaming_optimizations_attempted:
+    def _ensure_optimizations(self) -> None:
+        """Apply one shared optimization setup once for all generation paths."""
+        if self._optimizations_enabled or self._optimizations_attempted:
             return
-        self._streaming_optimizations_attempted = True
+        self._optimizations_attempted = True
 
         try:
             import torch
         except Exception as e:
-            logger.warning(f"Could not import torch for streaming optimizations: {e}")
+            logger.warning(f"Could not import torch for optimizations: {e}")
             return
 
         if not torch.cuda.is_available():
-            logger.info("CUDA unavailable; skipping streaming compile optimizations")
+            logger.info("CUDA unavailable; skipping compile optimizations")
             return
         if not hasattr(self.model, "enable_streaming_optimizations"):
-            logger.warning("Model does not expose enable_streaming_optimizations; skipping streaming optimization setup")
+            logger.warning("Model does not expose enable_streaming_optimizations; skipping optimization setup")
             return
 
         try:
-            compile_mode = self._resolve_stream_compile_mode()
+            compile_mode = self._resolve_compile_mode()
             optimize_kwargs = {
-                "decode_window_frames": self._stream_decode_window_frames,
-                "use_compile": True,
-                "use_cuda_graphs": False,
-                "compile_mode": compile_mode,
-                "compile_codebook_predictor": True,
-            }
-
-            # Backward compatibility: pass compile_talker only when supported.
-            try:
-                sig = inspect.signature(self.model.enable_streaming_optimizations)
-                if "compile_talker" in sig.parameters:
-                    optimize_kwargs["compile_talker"] = True
-                else:
-                    logger.info("compile_talker not supported by loaded qwen_tts; continuing without it")
-            except Exception as sig_err:
-                logger.warning(f"Could not inspect optimization signature: {sig_err}")
-
-            self.model.enable_streaming_optimizations(
-                **optimize_kwargs,
-            )
-            self._streaming_optimizations_enabled = True
-            logger.info(
-                "Applied streaming optimizations once (compile_mode=%s, decode_window_frames=%s, "
-                "emit_every_frames=%s, compile_codebook_predictor=True)",
-                compile_mode,
-                self._stream_decode_window_frames,
-                self._stream_emit_every_frames,
-            )
-            logger.info("First streaming request after compile setup may be slower due to graph/compile warmup")
-        except Exception as e:
-            logger.warning(f"Could not apply streaming optimization setup: {e}")
-
-    def _ensure_buffered_optimizations(self) -> None:
-        """Apply non-streaming optimizations once for buffered generation paths."""
-        if self._buffered_optimizations_enabled or self._buffered_optimizations_attempted:
-            return
-        self._buffered_optimizations_attempted = True
-
-        try:
-            import torch
-        except Exception as e:
-            logger.warning(f"Could not import torch for buffered optimizations: {e}")
-            return
-
-        if not torch.cuda.is_available():
-            logger.info("CUDA unavailable; skipping buffered compile optimizations")
-            return
-        if not hasattr(self.model, "enable_streaming_optimizations"):
-            logger.warning("Model does not expose enable_streaming_optimizations; skipping buffered optimization setup")
-            return
-
-        try:
-            compile_mode = self._resolve_buffered_compile_mode()
-            optimize_kwargs = {
-                "decode_window_frames": self._buffered_decode_window_frames,
+                "decode_window_frames": self._optimization_decode_window_frames,
                 "use_compile": True,
                 "use_cuda_graphs": False,
                 "compile_mode": compile_mode,
@@ -338,16 +264,17 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 logger.warning(f"Could not inspect optimization signature: {sig_err}")
 
             self.model.enable_streaming_optimizations(**optimize_kwargs)
-            self._buffered_optimizations_enabled = True
+            self._optimizations_enabled = True
             logger.info(
-                "Applied buffered optimizations once (compile_mode=%s, decode_window_frames=%s, "
-                "use_fast_codebook=True, use_cuda_graphs=False)",
+                "Applied unified optimizations once (compile_mode=%s, decode_window_frames=%s, "
+                "use_compile=True, use_cuda_graphs=False, use_fast_codebook=True, "
+                "compile_codebook_predictor=True)",
                 compile_mode,
-                self._buffered_decode_window_frames,
+                self._optimization_decode_window_frames,
             )
-            logger.info("First buffered request after compile setup may be slower due to compile warmup")
+            logger.info("First request after compile setup may be slower due to compile warmup")
         except Exception as e:
-            logger.warning(f"Could not apply buffered optimization setup: {e}")
+            logger.warning(f"Could not apply optimization setup: {e}")
 
     async def generate_speech_stream(
         self,
@@ -364,7 +291,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if speed != 1.0:
             raise RuntimeError("Streaming currently supports speed=1.0 only")
 
-        self._ensure_streaming_optimizations()
+        self._ensure_optimizations()
 
         try:
             # Base model with persisted custom voice prompt
@@ -555,7 +482,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 "The current model does not support voice cloning."
             )
 
-        self._ensure_buffered_optimizations()
+        self._ensure_optimizations()
 
         try:
             # Call the model's voice cloning method
@@ -605,7 +532,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if speed != 1.0:
             raise RuntimeError("Streaming currently supports speed=1.0 only")
 
-        self._ensure_streaming_optimizations()
+        self._ensure_optimizations()
 
         try:
             for chunk, sr in self.model.stream_generate_voice_clone(
@@ -754,7 +681,7 @@ class OfficialQwen3TTSBackend(TTSBackend):
         if prompt_items is None:
             raise RuntimeError(f"Custom voice '{voice}' not found")
 
-        self._ensure_buffered_optimizations()
+        self._ensure_optimizations()
 
         try:
             wavs, sr = self.model.generate_voice_clone(
