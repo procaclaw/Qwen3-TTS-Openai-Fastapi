@@ -57,6 +57,9 @@ class OfficialQwen3TTSBackend(TTSBackend):
         self._stream_decode_window_frames = 80
         self._streaming_optimizations_enabled = False
         self._streaming_optimizations_attempted = False
+        self._buffered_decode_window_frames = 300
+        self._buffered_optimizations_enabled = False
+        self._buffered_optimizations_attempted = False
     
     async def initialize(self) -> None:
         """Initialize the backend and load the model."""
@@ -177,6 +180,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         """
         if not self._ready:
             await self.initialize()
+
+        self._ensure_buffered_optimizations()
         
         try:
             # Generate speech
@@ -273,6 +278,56 @@ class OfficialQwen3TTSBackend(TTSBackend):
             logger.info("First streaming request after compile setup may be slower due to graph/compile warmup")
         except Exception as e:
             logger.warning(f"Could not apply streaming optimization setup: {e}")
+
+    def _ensure_buffered_optimizations(self) -> None:
+        """Apply non-streaming optimizations once for buffered generation paths."""
+        if self._buffered_optimizations_enabled or self._buffered_optimizations_attempted:
+            return
+        self._buffered_optimizations_attempted = True
+
+        try:
+            import torch
+        except Exception as e:
+            logger.warning(f"Could not import torch for buffered optimizations: {e}")
+            return
+
+        if not torch.cuda.is_available():
+            logger.info("CUDA unavailable; skipping buffered compile optimizations")
+            return
+        if not hasattr(self.model, "enable_streaming_optimizations"):
+            logger.warning("Model does not expose enable_streaming_optimizations; skipping buffered optimization setup")
+            return
+
+        try:
+            optimize_kwargs = {
+                "decode_window_frames": self._buffered_decode_window_frames,
+                "use_compile": True,
+                "use_cuda_graphs": False,
+                "compile_mode": "max-autotune",
+                "use_fast_codebook": True,
+                "compile_codebook_predictor": True,
+            }
+
+            # Backward compatibility: pass compile_talker only when supported.
+            try:
+                sig = inspect.signature(self.model.enable_streaming_optimizations)
+                if "compile_talker" in sig.parameters:
+                    optimize_kwargs["compile_talker"] = True
+                else:
+                    logger.info("compile_talker not supported by loaded qwen_tts; continuing without it")
+            except Exception as sig_err:
+                logger.warning(f"Could not inspect optimization signature: {sig_err}")
+
+            self.model.enable_streaming_optimizations(**optimize_kwargs)
+            self._buffered_optimizations_enabled = True
+            logger.info(
+                "Applied buffered optimizations once (compile_mode=max-autotune, decode_window_frames=%s, "
+                "use_fast_codebook=True, use_cuda_graphs=False)",
+                self._buffered_decode_window_frames,
+            )
+            logger.info("First buffered request after compile setup may be slower due to compile warmup")
+        except Exception as e:
+            logger.warning(f"Could not apply buffered optimization setup: {e}")
 
     async def generate_speech_stream(
         self,
@@ -480,6 +535,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
                 "The current model does not support voice cloning."
             )
 
+        self._ensure_buffered_optimizations()
+
         try:
             # Call the model's voice cloning method
             # ref_audio expects a tuple of (waveform, sample_rate)
@@ -676,6 +733,8 @@ class OfficialQwen3TTSBackend(TTSBackend):
         prompt_items = self._custom_voices.get(voice)
         if prompt_items is None:
             raise RuntimeError(f"Custom voice '{voice}' not found")
+
+        self._ensure_buffered_optimizations()
 
         try:
             wavs, sr = self.model.generate_voice_clone(

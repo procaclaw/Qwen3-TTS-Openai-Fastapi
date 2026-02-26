@@ -5,7 +5,11 @@ Tests for backend selection and initialization.
 """
 
 import os
+import sys
+import types
+import asyncio
 import pytest
+import numpy as np
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.backends.factory import get_backend, reset_backend
@@ -377,3 +381,75 @@ class TestBackendErrorHandling:
         backend = get_backend()
         assert backend.get_model_id() == "custom/model"
 
+
+class TestOfficialBackendOptimizations:
+    """Regression tests for streaming vs buffered optimization setup."""
+
+    def test_buffered_generation_applies_buffered_optimization_profile_once(self, monkeypatch):
+        """Buffered generation should enable non-stream optimization flags once."""
+        backend = OfficialQwen3TTSBackend()
+        backend._ready = True
+
+        optimize_calls = []
+
+        class DummyModel:
+            def enable_streaming_optimizations(self, **kwargs):
+                optimize_calls.append(kwargs)
+
+            def generate_custom_voice(self, **kwargs):
+                return [np.zeros(8, dtype=np.float32)], 24000
+
+        backend.model = DummyModel()
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        asyncio.run(backend.generate_speech(text="hello", voice="Vivian"))
+        asyncio.run(backend.generate_speech(text="hello again", voice="Vivian"))
+
+        assert len(optimize_calls) == 1
+        kwargs = optimize_calls[0]
+        assert kwargs["decode_window_frames"] == 300
+        assert kwargs["use_compile"] is True
+        assert kwargs["use_cuda_graphs"] is False
+        assert kwargs["compile_mode"] == "max-autotune"
+        assert kwargs["use_fast_codebook"] is True
+        assert kwargs["compile_codebook_predictor"] is True
+
+    def test_streaming_generation_keeps_streaming_optimization_profile(self, monkeypatch):
+        """Streaming generation should keep existing streaming optimization flags."""
+        backend = OfficialQwen3TTSBackend()
+        backend._ready = True
+
+        optimize_calls = []
+
+        class DummyModel:
+            def enable_streaming_optimizations(self, **kwargs):
+                optimize_calls.append(kwargs)
+
+            def stream_generate_voice_clone(self, **kwargs):
+                yield np.zeros(4, dtype=np.float32), 24000
+
+        backend.model = DummyModel()
+        backend._custom_voices["voice1"] = [{"dummy": True}]
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        async def _collect_stream():
+            chunks = []
+            async for chunk, sr in backend.generate_speech_stream(text="streaming", voice="voice1"):
+                chunks.append((chunk, sr))
+            return chunks
+
+        chunks = asyncio.run(_collect_stream())
+
+        assert len(chunks) == 1
+        assert len(optimize_calls) == 1
+        kwargs = optimize_calls[0]
+        assert kwargs["decode_window_frames"] == 80
+        assert kwargs["use_compile"] is True
+        assert kwargs["use_cuda_graphs"] is False
+        assert kwargs["compile_mode"] == "reduce-overhead"
+        assert kwargs["compile_codebook_predictor"] is True
+        assert "use_fast_codebook" not in kwargs
