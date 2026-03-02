@@ -135,8 +135,8 @@ response.stream_to_file("output.mp3")
 Set `stream=true` to receive chunked audio with `Transfer-Encoding: chunked`.
 
 Important:
-- Streaming currently supports only `response_format` = `pcm` or `wav`
-- Compressed formats (`mp3`, `opus`, `aac`, `flac`) return `400` when `stream=true`
+- Streaming supports `response_format` = `mp3`, `opus`, `aac`, `flac`, `wav`, or `pcm`
+- `wav`/`pcm` keep the low-latency direct chunk path; compressed formats stream through an incremental encoder
 - For now, streaming requires `speed=1.0`
 
 ```bash

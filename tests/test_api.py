@@ -246,9 +246,11 @@ class TestSpeechEndpoint:
         assert response.headers["content-disposition"] == "attachment; filename=speech.pcm"
         assert len(response.content) > 0
 
-    def test_speech_streaming_coerces_unsupported_format_to_wav(self, client):
-        """Test stream=true coerces unsupported formats to wav."""
+    @pytest.mark.parametrize("fmt", ["mp3", "opus", "aac", "flac", "wav", "pcm"])
+    def test_speech_streaming_honors_requested_response_format(self, client, monkeypatch, fmt):
+        """Test stream=true preserves requested response_format (no coercion)."""
         from api.backends import factory
+        from api.routers import openai_compatible as router_mod
 
         mock_backend = MagicMock()
         mock_backend.is_ready.return_value = True
@@ -262,20 +264,29 @@ class TestSpeechEndpoint:
         mock_backend.generate_speech_stream = fake_stream
         factory._backend_instance = mock_backend
 
+        monkeypatch.setattr(router_mod, "ensure_streaming_encoding_supported", lambda _fmt: None)
+
+        async def fake_encode_audio_streaming(audio_generator, fmt_value, sample_rate):
+            async for _ in audio_generator:
+                pass
+            yield f"encoded-{fmt_value}-sr{sample_rate}".encode("utf-8")
+
+        monkeypatch.setattr(router_mod, "encode_audio_streaming", fake_encode_audio_streaming)
+
         response = client.post(
             "/v1/audio/speech",
             json={
                 "model": "qwen3-tts",
                 "input": "Hello",
                 "voice": "Vivian",
-                "response_format": "mp3",
+                "response_format": fmt,
                 "stream": True,
             },
         )
 
         assert response.status_code == 200
-        assert response.headers["content-type"].startswith("audio/wav")
-        assert response.headers["content-disposition"] == "attachment; filename=speech.wav"
+        assert response.headers["content-type"].startswith(f"audio/{'mpeg' if fmt == 'mp3' else fmt}")
+        assert response.headers["content-disposition"] == f"attachment; filename=speech.{fmt}"
         assert len(response.content) > 0
 
     def test_speech_streaming_rejects_non_default_speed(self, client):
@@ -326,6 +337,40 @@ class TestSpeechEndpoint:
         assert response.status_code == 400
         data = response.json()
         assert data["detail"]["error"] == "streaming_not_supported"
+
+    def test_speech_streaming_rejects_unsupported_streaming_encoding_combo(self, client, monkeypatch):
+        """Test stream=true returns clear error for unsupported stream/format environment combos."""
+        from api.backends import factory
+        from api.routers import openai_compatible as router_mod
+
+        mock_backend = MagicMock()
+        mock_backend.is_ready.return_value = True
+        mock_backend.supports_speech_streaming.return_value = True
+        factory._backend_instance = mock_backend
+
+        def fake_ensure_streaming_encoding_supported(_fmt):
+            raise ValueError("ffmpeg missing for compressed streaming")
+
+        monkeypatch.setattr(
+            router_mod,
+            "ensure_streaming_encoding_supported",
+            fake_ensure_streaming_encoding_supported,
+        )
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "qwen3-tts",
+                "input": "Hello",
+                "voice": "Vivian",
+                "response_format": "mp3",
+                "stream": True,
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"] == "unsupported_streaming_response_format"
 
 
 class TestVoiceCloneEndpoints:

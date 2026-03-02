@@ -8,6 +8,8 @@ Handles conversion of raw audio to various formats (mp3, opus, aac, flac, wav, p
 import io
 import logging
 import struct
+import asyncio
+import shutil
 from typing import Literal, Optional
 
 import numpy as np
@@ -15,6 +17,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 AudioFormat = Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
+COMPRESSED_FORMATS = {"mp3", "opus", "aac", "flac"}
 
 # Default sample rate for Qwen3-TTS output
 DEFAULT_SAMPLE_RATE = 24000
@@ -184,6 +187,135 @@ def encode_audio(
         return convert_to_wav(audio, sample_rate)
 
 
+def ensure_streaming_encoding_supported(format: AudioFormat) -> None:
+    """Validate streaming encoding support for requested format."""
+    if format in {"wav", "pcm"}:
+        return
+
+    if format not in COMPRESSED_FORMATS:
+        raise ValueError(f"Unsupported response_format for streaming: {format}")
+
+    if shutil.which("ffmpeg") is None:
+        raise ValueError(
+            "Streaming compressed audio requires ffmpeg in PATH for response_format="
+            f"{format}"
+        )
+
+
+def _build_streaming_ffmpeg_cmd(format: AudioFormat, sample_rate: int) -> list[str]:
+    """Build ffmpeg command for incremental stdout encoding."""
+    base = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-flush_packets",
+        "1",
+        "-fflags",
+        "+flush_packets",
+    ]
+
+    codec_args = {
+        "mp3": ["-c:a", "libmp3lame", "-b:a", "192k", "-write_xing", "0", "-f", "mp3"],
+        "opus": ["-c:a", "libopus", "-b:a", "128k", "-application", "audio", "-f", "opus"],
+        "aac": ["-c:a", "aac", "-b:a", "192k", "-f", "adts"],
+        "flac": ["-c:a", "flac", "-f", "flac"],
+    }
+
+    if format not in codec_args:
+        raise ValueError(f"Unsupported streaming ffmpeg format: {format}")
+
+    return [*base, *codec_args[format], "pipe:1"]
+
+
+class _StreamingFfmpegEncoder:
+    """Stateful, incremental ffmpeg-based encoder for streaming compressed formats."""
+
+    def __init__(self, format: AudioFormat, sample_rate: int):
+        self.format = format
+        self.sample_rate = sample_rate
+        self._process: Optional[asyncio.subprocess.Process] = None
+
+    async def start(self) -> None:
+        cmd = _build_streaming_ffmpeg_cmd(self.format, self.sample_rate)
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "ffmpeg binary not found while starting streaming encoder"
+            ) from e
+
+    async def _read_available_stdout(self, timeout_s: float = 0.01) -> bytes:
+        if self._process is None or self._process.stdout is None:
+            return b""
+
+        out = bytearray()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(self._process.stdout.read(8192), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                break
+
+            if not chunk:
+                break
+            out.extend(chunk)
+
+            if len(chunk) < 8192:
+                break
+
+        return bytes(out)
+
+    async def encode_pcm_chunk(self, pcm_chunk: bytes) -> bytes:
+        if self._process is None or self._process.stdin is None:
+            raise RuntimeError("Streaming encoder is not started")
+
+        self._process.stdin.write(pcm_chunk)
+        await self._process.stdin.drain()
+        return await self._read_available_stdout()
+
+    async def finish(self) -> bytes:
+        if self._process is None:
+            return b""
+
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+            await self._process.stdin.wait_closed()
+
+        remaining = bytearray()
+        if self._process.stdout is not None:
+            while True:
+                chunk = await self._process.stdout.read(8192)
+                if not chunk:
+                    break
+                remaining.extend(chunk)
+
+        stderr_bytes = b""
+        if self._process.stderr is not None:
+            stderr_bytes = await self._process.stderr.read()
+
+        rc = await self._process.wait()
+        if rc != 0:
+            stderr_msg = stderr_bytes.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(
+                f"ffmpeg streaming encoder exited with code {rc} for format={self.format}: {stderr_msg}"
+            )
+
+        return bytes(remaining)
+
+
 async def encode_audio_streaming(
     audio_generator,
     format: AudioFormat = "mp3",
@@ -200,51 +332,76 @@ async def encode_audio_streaming(
     Yields:
         Encoded audio chunks
     """
-    if format not in {"wav", "pcm"}:
-        raise ValueError(
-            "Streaming currently supports only 'wav' and 'pcm' response_format values"
-        )
+    ensure_streaming_encoding_supported(format)
 
     stream_sample_rate = sample_rate
     wav_header_emitted = False
+    ffmpeg_encoder: Optional[_StreamingFfmpegEncoder] = None
 
-    async for item in audio_generator:
-        if item is None:
-            continue
+    try:
+        async for item in audio_generator:
+            if item is None:
+                continue
 
-        if isinstance(item, tuple):
-            audio_chunk, chunk_sample_rate = item
-            if chunk_sample_rate:
-                stream_sample_rate = int(chunk_sample_rate)
-        else:
-            audio_chunk = item
+            if isinstance(item, tuple):
+                audio_chunk, chunk_sample_rate = item
+                if chunk_sample_rate:
+                    stream_sample_rate = int(chunk_sample_rate)
+            else:
+                audio_chunk = item
 
-        if audio_chunk is None or len(audio_chunk) == 0:
-            continue
+            if audio_chunk is None or len(audio_chunk) == 0:
+                continue
 
-        if format == "wav" and not wav_header_emitted:
-            # Streaming WAV uses unknown-length RIFF/data sizes.
-            num_channels = 1
-            bits_per_sample = 16
-            bytes_per_sample = bits_per_sample // 8
-            byte_rate = stream_sample_rate * num_channels * bytes_per_sample
-            block_align = num_channels * bytes_per_sample
+            if format == "wav" and not wav_header_emitted:
+                # Streaming WAV uses unknown-length RIFF/data sizes.
+                num_channels = 1
+                bits_per_sample = 16
+                bytes_per_sample = bits_per_sample // 8
+                byte_rate = stream_sample_rate * num_channels * bytes_per_sample
+                block_align = num_channels * bytes_per_sample
 
-            header = io.BytesIO()
-            header.write(b"RIFF")
-            header.write(struct.pack("<I", 0xFFFFFFFF))
-            header.write(b"WAVE")
-            header.write(b"fmt ")
-            header.write(struct.pack("<I", 16))
-            header.write(struct.pack("<H", 1))
-            header.write(struct.pack("<H", num_channels))
-            header.write(struct.pack("<I", stream_sample_rate))
-            header.write(struct.pack("<I", byte_rate))
-            header.write(struct.pack("<H", block_align))
-            header.write(struct.pack("<H", bits_per_sample))
-            header.write(b"data")
-            header.write(struct.pack("<I", 0xFFFFFFFF))
-            yield header.getvalue()
-            wav_header_emitted = True
+                header = io.BytesIO()
+                header.write(b"RIFF")
+                header.write(struct.pack("<I", 0xFFFFFFFF))
+                header.write(b"WAVE")
+                header.write(b"fmt ")
+                header.write(struct.pack("<I", 16))
+                header.write(struct.pack("<H", 1))
+                header.write(struct.pack("<H", num_channels))
+                header.write(struct.pack("<I", stream_sample_rate))
+                header.write(struct.pack("<I", byte_rate))
+                header.write(struct.pack("<H", block_align))
+                header.write(struct.pack("<H", bits_per_sample))
+                header.write(b"data")
+                header.write(struct.pack("<I", 0xFFFFFFFF))
+                yield header.getvalue()
+                wav_header_emitted = True
 
-        yield convert_to_pcm(audio_chunk)
+            pcm_chunk = convert_to_pcm(audio_chunk)
+
+            if format in {"wav", "pcm"}:
+                yield pcm_chunk
+                continue
+
+            if ffmpeg_encoder is None:
+                ffmpeg_encoder = _StreamingFfmpegEncoder(format, stream_sample_rate)
+                await ffmpeg_encoder.start()
+            elif stream_sample_rate != ffmpeg_encoder.sample_rate:
+                raise ValueError(
+                    "Variable sample rate is not supported for compressed streaming response_format="
+                    f"{format}: got {stream_sample_rate}, expected {ffmpeg_encoder.sample_rate}"
+                )
+
+            encoded_chunk = await ffmpeg_encoder.encode_pcm_chunk(pcm_chunk)
+            if encoded_chunk:
+                yield encoded_chunk
+
+        if ffmpeg_encoder is not None:
+            remaining = await ffmpeg_encoder.finish()
+            if remaining:
+                yield remaining
+    finally:
+        if ffmpeg_encoder is not None and ffmpeg_encoder._process is not None:
+            if ffmpeg_encoder._process.returncode is None:
+                ffmpeg_encoder._process.kill()
