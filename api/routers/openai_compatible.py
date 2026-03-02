@@ -353,15 +353,13 @@ async def create_speech(
                     },
                 )
 
-            if request.speed != 1.0:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "invalid_speed_for_streaming",
-                        "message": "stream=true currently requires speed=1.0.",
-                        "type": "invalid_request_error",
-                    },
+            stream_speed = request.speed
+            if stream_speed != 1.0:
+                logger.info(
+                    "Streaming request speed=%s is unsupported; coercing to speed=1.0",
+                    request.speed,
                 )
+                stream_speed = 1.0
 
             try:
                 ensure_streaming_encoding_supported(request.response_format)
@@ -380,7 +378,7 @@ async def create_speech(
                 "Streaming branch selected: backend=%s format=%s speed=%s content_type=%s",
                 backend.get_backend_name(),
                 request.response_format,
-                request.speed,
+                stream_speed,
                 stream_content_type,
             )
             audio_stream = generate_speech_stream(
@@ -388,7 +386,7 @@ async def create_speech(
                 voice=request.voice,
                 language=language,
                 instruct=request.instruct,
-                speed=request.speed,
+                speed=stream_speed,
                 backend=backend,
             )
             encoded_stream = encode_audio_streaming(

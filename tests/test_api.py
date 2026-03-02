@@ -289,14 +289,30 @@ class TestSpeechEndpoint:
         assert response.headers["content-disposition"] == f"attachment; filename=speech.{fmt}"
         assert len(response.content) > 0
 
-    def test_speech_streaming_rejects_non_default_speed(self, client):
-        """Test stream=true enforces speed=1.0 for safe chunk streaming."""
+    def test_speech_streaming_coerces_non_default_speed_to_one(self, client, monkeypatch):
+        """Test stream=true coerces unsupported non-default speed to 1.0."""
         from api.backends import factory
+        from api.routers import openai_compatible as router_mod
 
         mock_backend = MagicMock()
         mock_backend.is_ready.return_value = True
         mock_backend.supports_speech_streaming.return_value = True
+        mock_backend.is_custom_voice.return_value = False
         factory._backend_instance = mock_backend
+
+        captured = {}
+
+        async def fake_generate_speech_stream(*args, **kwargs):
+            captured["speed"] = kwargs.get("speed")
+            yield np.array([0.0, 0.5], dtype=np.float32), 24000
+
+        async def fake_encode_audio_streaming(audio_generator, fmt_value, sample_rate):
+            async for _ in audio_generator:
+                pass
+            yield b"ok"
+
+        monkeypatch.setattr(router_mod, "generate_speech_stream", fake_generate_speech_stream)
+        monkeypatch.setattr(router_mod, "encode_audio_streaming", fake_encode_audio_streaming)
 
         response = client.post(
             "/v1/audio/speech",
@@ -310,9 +326,8 @@ class TestSpeechEndpoint:
             },
         )
 
-        assert response.status_code == 400
-        data = response.json()
-        assert data["detail"]["error"] == "invalid_speed_for_streaming"
+        assert response.status_code == 200
+        assert captured["speed"] == 1.0
 
     def test_speech_streaming_rejects_backend_without_streaming(self, client):
         """Test stream=true rejects backends that do not support true streaming."""
