@@ -24,7 +24,13 @@ from ..structures.schemas import (
     VoiceCloneCapabilities,
 )
 from ..services.text_processing import normalize_text
-from ..services.audio_encoding import encode_audio, encode_audio_streaming, get_content_type, DEFAULT_SAMPLE_RATE
+from ..services.audio_encoding import (
+    encode_audio,
+    encode_audio_streaming,
+    get_content_type,
+    DEFAULT_SAMPLE_RATE,
+    ensure_streaming_encoding_supported,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -327,65 +333,77 @@ async def create_speech(
                 },
             )
 
-        # Streaming response (coerce unsupported params instead of falling back)
+        # Streaming response
         if request.stream:
             logger.info(
                 "Streaming requested: backend=%s supports_streaming=%s",
                 backend.get_backend_name(),
                 backend.supports_speech_streaming(),
             )
-            if backend.supports_speech_streaming():
-                stream_speed = request.speed
-                stream_format = request.response_format
-
-                if stream_speed != 1.0:
-                    logger.info(
-                        "Streaming request speed=%s is unsupported; coercing to speed=1.0",
-                        request.speed,
-                    )
-                    stream_speed = 1.0
-
-                if stream_format not in {"wav", "pcm"}:
-                    logger.info(
-                        "Streaming request response_format=%s is unsupported; coercing to response_format=wav",
-                        request.response_format,
-                    )
-                    stream_format = "wav"
-
-                stream_content_type = get_content_type(stream_format)
-                logger.info(
-                    "Streaming branch selected: backend=%s format=%s speed=%s content_type=%s",
-                    backend.get_backend_name(),
-                    stream_format,
-                    stream_speed,
-                    stream_content_type,
-                )
-                audio_stream = generate_speech_stream(
-                    text=normalized_text,
-                    voice=request.voice,
-                    language=language,
-                    instruct=request.instruct,
-                    speed=stream_speed,
-                    backend=backend,
-                )
-                encoded_stream = encode_audio_streaming(
-                    audio_stream,
-                    stream_format,
-                    DEFAULT_SAMPLE_RATE,
-                )
-
-                return StreamingResponse(
-                    encoded_stream,
-                    media_type=stream_content_type,
-                    headers={
-                        "Content-Disposition": f"attachment; filename=speech.{stream_format}",
-                        "Cache-Control": "no-cache",
+            if not backend.supports_speech_streaming():
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "streaming_not_supported",
+                        "message": (
+                            f"Backend '{backend.get_backend_name()}' does not support true streaming "
+                            "for /v1/audio/speech."
+                        ),
+                        "type": "invalid_request_error",
                     },
                 )
 
+            if request.speed != 1.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "invalid_speed_for_streaming",
+                        "message": "stream=true currently requires speed=1.0.",
+                        "type": "invalid_request_error",
+                    },
+                )
+
+            try:
+                ensure_streaming_encoding_supported(request.response_format)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "unsupported_streaming_response_format",
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                    },
+                )
+
+            stream_content_type = get_content_type(request.response_format)
             logger.info(
-                "Streaming requested but backend '%s' lacks true streaming support; falling back to buffered mode",
+                "Streaming branch selected: backend=%s format=%s speed=%s content_type=%s",
                 backend.get_backend_name(),
+                request.response_format,
+                request.speed,
+                stream_content_type,
+            )
+            audio_stream = generate_speech_stream(
+                text=normalized_text,
+                voice=request.voice,
+                language=language,
+                instruct=request.instruct,
+                speed=request.speed,
+                backend=backend,
+            )
+            encoded_stream = encode_audio_streaming(
+                audio_stream,
+                request.response_format,
+                DEFAULT_SAMPLE_RATE,
+            )
+
+            return StreamingResponse(
+                encoded_stream,
+                media_type=stream_content_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
+                    "Cache-Control": "no-cache",
+                },
             )
 
         # Non-streaming response (existing behavior)
