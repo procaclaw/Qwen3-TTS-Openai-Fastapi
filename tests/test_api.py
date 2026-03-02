@@ -246,13 +246,20 @@ class TestSpeechEndpoint:
         assert response.headers["content-disposition"] == "attachment; filename=speech.pcm"
         assert len(response.content) > 0
 
-    def test_speech_streaming_rejects_compressed_format(self, client):
-        """Test stream=true rejects compressed formats with clear validation error."""
+    def test_speech_streaming_coerces_unsupported_format_to_wav(self, client):
+        """Test stream=true coerces unsupported formats to wav."""
         from api.backends import factory
 
         mock_backend = MagicMock()
         mock_backend.is_ready.return_value = True
         mock_backend.supports_speech_streaming.return_value = True
+        mock_backend.is_custom_voice.return_value = False
+
+        async def fake_stream(*args, **kwargs):
+            yield np.array([0.0, 0.5], dtype=np.float32), 24000
+            yield np.array([-0.5, 1.0], dtype=np.float32), 24000
+
+        mock_backend.generate_speech_stream = fake_stream
         factory._backend_instance = mock_backend
 
         response = client.post(
@@ -266,9 +273,10 @@ class TestSpeechEndpoint:
             },
         )
 
-        assert response.status_code == 400
-        data = response.json()
-        assert data["detail"]["error"] == "invalid_response_format"
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/wav")
+        assert response.headers["content-disposition"] == "attachment; filename=speech.wav"
+        assert len(response.content) > 0
 
     def test_speech_streaming_rejects_non_default_speed(self, client):
         """Test stream=true enforces speed=1.0 for safe chunk streaming."""

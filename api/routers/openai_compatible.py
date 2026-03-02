@@ -347,10 +347,10 @@ async def create_speech(
 
                 if stream_format not in {"wav", "pcm"}:
                     logger.info(
-                        "Streaming request response_format=%s is unsupported; coercing to response_format=pcm",
+                        "Streaming request response_format=%s is unsupported; coercing to response_format=wav",
                         request.response_format,
                     )
-                    stream_format = "pcm"
+                    stream_format = "wav"
 
                 stream_content_type = get_content_type(stream_format)
                 logger.info(
